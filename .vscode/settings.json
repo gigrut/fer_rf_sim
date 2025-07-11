@@ -1,0 +1,13 @@
+{
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingImports": "none",
+    "reportMissingTypeStubs": "none",
+    "reportUnknownMemberType": "none",
+    "reportUnknownVariableType": "none",
+    "reportUnknownArgumentType": "none",
+    "reportUnknownLambdaType": "none",
+    "reportUnknownParameterType": "none",
+    "reportMissingTypeArgument": "none"
+  }
+} 
