@@ -578,7 +578,7 @@ def cli():
     p.add_argument('--phi_samp', type=np.float64, default=4.0)
     p.add_argument('--n_cheb', type=int, default=32)
     p.add_argument('--threads', type=int, default=-1)
-    p.add_argument('--out', type=str, default=r'C:\Users\willh\OneDrive - The Ohio State University\Will Koll\Code\FER_Simulation\fer_output')
+    p.add_argument('--out', type=str, default='fer_output')
     p.add_argument('--force-rebuild-lut', action='store_true', help='Force rebuild of LUT even if compatible one exists')
     p.add_argument('--list-luts', action='store_true', help='List existing LUT files and exit')
     p.add_argument('--use-lut', action='store_true', default=False, help='Use LUT for transmission (default: direct calculation)')
