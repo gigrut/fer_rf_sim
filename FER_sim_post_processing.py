@@ -4,16 +4,8 @@ import h5py
 import plotly.graph_objects as go
 from scipy.interpolate import RegularGridInterpolator, interp1d
 import argparse
-from FER_plotter import (
-    plot_Z_vs_V_at_constant_I_and_A,
-    plot_current_and_dIdV_volume,
-    plot_dIdV_vs_V_at_constant_I_and_A,
-    plot_dIdV_heatmap_CC_slider,
-    plot_dIdV_heatmap_CH_slider,
-    plot_constant_current_isosurface,
-    constant_current_slice,
-    build_constant_current_4D
-)
+# Note: constant_current_slice and build_constant_current_4D are defined in this file
+# The plotting functions from FER_plotter are not available in the current version
 
 # ------------------------------------------------------------------------------
 # Load the simulation output (must run FER_constant_current_simulation.py first)

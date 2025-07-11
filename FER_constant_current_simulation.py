@@ -188,8 +188,6 @@ def transmission(E, V, d, phi_t, phi_s,
           log T = - (4 a)/(3 F) [W0^1.5 - Ws^1.5]
       - Airy-based trapezoid for |F| > F1
     """
-    import numpy as np
-
     # 1) ensure arrays
     E = np.asarray(E, np.float64)
     V = np.asarray(V, np.float64)
@@ -389,7 +387,7 @@ def build_lut(Eg, Vg, zg, phi_t, phi_s, upscale=1, fudge=1):
 # LUT management utilities
 ###############################################################################
 
-def list_existing_luts(fer_output_dir='fer_output'):
+def list_existing_luts(fer_output_dir='C:/Users/willh/OneDrive/Desktop/FER_Simulation/fer_output'):
     """List existing LUT files and their parameters."""
     lut_dir = Path(fer_output_dir)
     if not lut_dir.exists():
@@ -443,8 +441,8 @@ def D_avg(interp, Eg, Vdc, Arf, z, nodes):
 
 def current(D_E, Eg, Vdc):
     mask = Eg < (E_F - Vdc)
-    p1 = np.trapz(Vdc*D_E[mask], Eg[mask]) if mask.any() else 0.0
-    p2 = np.trapz((E_F - Eg[~mask])*D_E[~mask], Eg[~mask]) if (~mask).any() else 0.0
+    p1 = np.trapezoid(Vdc*D_E[mask], Eg[mask]) if mask.any() else 0.0
+    p2 = np.trapezoid((E_F - Eg[~mask])*D_E[~mask], Eg[~mask]) if (~mask).any() else 0.0
     return p1 + p2
 
 
@@ -483,10 +481,16 @@ def simulate(a):
             except Exception:
                 return False
 
+        # Determine upscaling factors first
+        upscale_z = getattr(a, 'upscale_z', None) or a.upscale
+        upscale_v = getattr(a, 'upscale_v', None) or a.upscale  
+        upscale_e = getattr(a, 'upscale_e', None) or a.upscale
+        upscale_factors = (upscale_z, upscale_v, upscale_e)
+        
         # Create parameter-based LUT filename
         upscale_str = f"_up{upscale_z}{upscale_v}{upscale_e}" if upscale_factors != (1,1,1) else ""
-        lut_filename = f"transmission_lut_phi{a.phi_tip:.1f}_{a.phi_samp:.1f}_nE{len(Eg)}_nV{len(Vg_lut)}_nZ{len(zg)}{upscale_str}.h5"
-        lut_file = Path('fer_output') / lut_filename
+        lut_filename = f"transmission_lut_phit{a.phi_tip:.1f}_phis{a.phi_samp:.1f}_nE{len(Eg)}_nV{len(Vg_lut)}_nZ{len(zg)}{upscale_str}.h5"
+        lut_file = out / lut_filename
         rebuild_lut = True
         if lut_file.exists() and not getattr(a, 'force_rebuild_lut', False):
             with h5py.File(lut_file, 'r') as f:
@@ -501,12 +505,6 @@ def simulate(a):
                     print('[rebuild] LUT: grid or parameters changed.')
         elif getattr(a, 'force_rebuild_lut', False):
             print('[rebuild] LUT: forced rebuild requested.')
-
-        # Determine upscaling factors
-        upscale_z = getattr(a, 'upscale_z', None) or a.upscale
-        upscale_v = getattr(a, 'upscale_v', None) or a.upscale  
-        upscale_e = getattr(a, 'upscale_e', None) or a.upscale
-        upscale_factors = (upscale_z, upscale_v, upscale_e)
         
         if rebuild_lut:
             print(f'[build] LUT with upscaling factors: z={upscale_z}, v={upscale_v}, e={upscale_e}')
@@ -551,11 +549,34 @@ def simulate(a):
         res = Parallel(n_jobs=a.threads)(delayed(_row)(i,z) for i,z in enumerate(zg))  # type: ignore
         for i,r in res: I[i]=r  # type: ignore
 
-    with h5py.File(out/'current.h5','w') as f:
+    # Create parameterized filename for current results
+    current_filename = f"current_phit{a.phi_tip:.1f}_phis{a.phi_samp:.1f}_nE{a.n_E}_nV{a.n_V}_nZ{a.n_Z}_nA{a.n_A}.h5"
+    current_file = out / current_filename
+    
+    with h5py.File(current_file, 'w') as f:
+        # Main data
         f.create_dataset('I', data=I, compression='gzip')
-        f.create_dataset('z', data=zg); f.create_dataset('V', data=Vg); f.create_dataset('A_rf', data=Ag)
-        f.attrs['phi_tip']=a.phi_tip; f.attrs['phi_samp']=a.phi_samp
-    print('[save] current.h5 written')
+        f.create_dataset('z', data=zg)
+        f.create_dataset('V', data=Vg)
+        f.create_dataset('A_rf', data=Ag)
+        
+        # Simulation parameters as attributes (ensure all are present)
+        f.attrs['phi_tip'] = float(a.phi_tip)
+        f.attrs['phi_samp'] = float(a.phi_samp)
+        f.attrs['n_E'] = int(a.n_E)
+        f.attrs['n_V'] = int(a.n_V)
+        f.attrs['n_Z'] = int(a.n_Z)
+        f.attrs['n_A'] = int(a.n_A)
+        f.attrs['n_cheb'] = int(a.n_cheb)
+        f.attrs['use_lut'] = getattr(a, 'use_lut', False)
+        f.attrs['fudge_factor'] = fudge
+        f.attrs['E_F'] = E_F
+        
+        # Grid information
+        f.attrs['dV'] = dV
+        f.attrs['n_V_lut'] = len(Vg_lut)
+        
+    print('[save] current.h5 written with parameters')
 
 ###############################################################################
 # CLI
@@ -565,8 +586,8 @@ def cli():
     p = argparse.ArgumentParser()
     p.add_argument('--n_E', type=int, default=100)
     p.add_argument('--n_V', type=int, default=100)
-    p.add_argument('--n_Z', type=int, default=10)
-    p.add_argument('--n_A', type=int, default=10)
+    p.add_argument('--n_Z', type=int, default=100)
+    p.add_argument('--n_A', type=int, default=30)
     p.add_argument('--e_extra', type=np.float64, default=0.0)
     p.add_argument('--v_min', type=np.float64, default=1.0)
     p.add_argument('--v_max', type=np.float64, default=10.0)
@@ -578,10 +599,10 @@ def cli():
     p.add_argument('--phi_samp', type=np.float64, default=4.0)
     p.add_argument('--n_cheb', type=int, default=32)
     p.add_argument('--threads', type=int, default=-1)
-    p.add_argument('--out', type=str, default='fer_output')
+    p.add_argument('--out', type=str, default='C:/Users/willh/OneDrive/Desktop/FER_Simulation/fer_output')
     p.add_argument('--force-rebuild-lut', action='store_true', help='Force rebuild of LUT even if compatible one exists')
     p.add_argument('--list-luts', action='store_true', help='List existing LUT files and exit')
-    p.add_argument('--use-lut', action='store_true', default=False, help='Use LUT for transmission (default: direct calculation)')
+    p.add_argument('--use-lut', action='store_true', default=True, help='Use LUT for transmission (default: direct calculation)')
     p.add_argument('--upscale', type=int, default=1, help='Upscale LUT resolution by this factor (default: 1)')
     p.add_argument('--upscale-z', type=int, help='Upscale z-axis resolution (overrides --upscale)')
     p.add_argument('--upscale-v', type=int, help='Upscale voltage-axis resolution (overrides --upscale)')
@@ -601,4 +622,8 @@ if __name__ == '__main__':
     print('Begin simulation...')
     cli()
     print('Simulation done')
-    os.system('git push')
+    # Automatically run quick_check.py after simulation
+    import subprocess
+    print('Running quick_check.py for immediate analysis...')
+    subprocess.run(['python', 'quick_check.py'])
+    # os.system('git push')
