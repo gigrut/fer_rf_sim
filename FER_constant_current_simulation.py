@@ -565,7 +565,7 @@ def cli():
     p = argparse.ArgumentParser()
     p.add_argument('--n_E', type=int, default=100)
     p.add_argument('--n_V', type=int, default=100)
-    p.add_argument('--n_Z', type=int, default=100)
+    p.add_argument('--n_Z', type=int, default=10)
     p.add_argument('--n_A', type=int, default=10)
     p.add_argument('--e_extra', type=np.float64, default=0.0)
     p.add_argument('--v_min', type=np.float64, default=1.0)
@@ -601,3 +601,4 @@ if __name__ == '__main__':
     print('Begin simulation...')
     cli()
     print('Simulation done')
+    os.system('git push')
