@@ -2,6 +2,7 @@ import argparse
 import os
 from pathlib import Path
 import time
+import yaml
 
 import h5py
 import numpy as np
@@ -183,70 +184,103 @@ def airy_all(z, z_switch=8.0):
 def transmission(E, V, d, phi_t, phi_s,
                  F1=0.2, z_switch=8.0, fudge=3.69):
     """
-    Two-regime transmission:
-      - Simmons trapezoidal WKB for |F| <= F1:
-          log T = - (4 a)/(3 F) [W0^1.5 - Ws^1.5]
-      - Airy-based trapezoid for |F| > F1
+    Transmission probability through a trapezoidal vacuum barrier.
+
+    Works for any broadcast-compatible mix of scalars/arrays in E, V, d.
     """
-    # 1) ensure arrays
-    E = np.asarray(E, np.float64)
-    V = np.asarray(V, np.float64)
 
-    # 2) relabel electrodes
-    swap      = V < 0
-    V_eff     = np.abs(V)
-    phi1      = np.where(swap, phi_s, phi_t)
-    phi2      = np.where(swap, phi_t, phi_s)
-    # phi1     += image_potential(d, V_eff, phi1) # This needs work
+    import numpy as np
 
-    # 3) barrier tops & field
+    # ---------- small helpers -------------------------------------------------
+    def _to_arr(x):          # ndarray wrapper (keeps 0-D scalars cheap)
+        return np.asarray(x, dtype=np.float64)
+
+    def _slice_if_arr(x, mask):
+        """Return x[mask] if x is array-like, else the scalar x."""
+        return x[mask] if isinstance(x, np.ndarray) and x.ndim else x
+
+    def _is_scalar(x):
+        return (not isinstance(x, np.ndarray)) or x.ndim == 0
+    # -------------------------------------------------------------------------
+
+    # 1) broadcast all inputs to common shape
+    E = _to_arr(E)
+    V = _to_arr(V)
+    d = _to_arr(d)
+
+    # 2) relabel electrodes so V_eff ≥ 0
+    swap   = V < 0
+    V_eff  = np.abs(V)
+    phi1   = np.where(swap, phi_s, phi_t)
+    phi2   = np.where(swap, phi_t, phi_s)
+    # (optional image-charge term would be added here)
+
+    # 3) barrier tops and electric field
     W0         = phi1 + E_F - E
     Ws_minus_V = phi2 + E_F - E - V_eff
     F_s        = (V_eff + phi1 - phi2) / d
 
-    # 4) prepare output
+    # 4) allocate output
     T = np.zeros_like(E, dtype=np.float64)
 
-    # 5) Simmons-WKB region: |F| <= F1 and both barriers > 0
+    # ---------------------- WKB region  |F| ≤ F1 ------------------------------
     m_wkb = (np.abs(F_s) <= F1) & (W0 > 0) & (Ws_minus_V > 0)
     if np.any(m_wkb):
-        F_wkb   = F_s[m_wkb]
-        W0w     = W0[m_wkb]
-        Wsw     = Ws_minus_V[m_wkb]
-        delta   = W0w**1.5 - Wsw**1.5
-        logT    = - (4*a) / (3 * F_wkb) * delta
-        T[m_wkb] = fudge*np.exp(logT)
+        F_wkb = F_s[m_wkb]
+        W0w   = W0[m_wkb]
+        Wsw   = Ws_minus_V[m_wkb]
+        delta = W0w**1.5 - Wsw**1.5
 
-    # 6) Airy region: |F| > F1
+        logT = np.empty_like(F_wkb)
+
+        # distance values compatible with mask size
+        d_wkb = _slice_if_arr(d, m_wkb)
+
+        # (a) rectangular limit  |F|→0
+        mask_rect = np.abs(F_wkb) < 1e-10
+        if np.any(mask_rect):
+            d_rect = d_wkb if _is_scalar(d_wkb) else d_wkb[mask_rect]
+            logT[mask_rect] = -2 * a * d_rect * (
+                np.sqrt(W0w[mask_rect]) - np.sqrt(Wsw[mask_rect])
+            )
+
+        # (b) genuine WKB
+        mask_wkb = ~mask_rect
+        if np.any(mask_wkb):
+            logT[mask_wkb] = -(4 * a) / (3 * F_wkb[mask_wkb]) * delta[mask_wkb]
+
+        T[m_wkb] = fudge * np.exp(logT)
+
+    # ------------------------- Airy region  |F| > F1 --------------------------
     m_air = ~m_wkb
     if np.any(m_air):
-        F_air   = F_s[m_air]
-        factor  = (a / np.abs(F_air))**(2/3)
-        z0      = factor * W0[m_air]
-        zs      = factor * Ws_minus_V[m_air]
-        zp      = np.sign(F_air) * (a**2 * np.abs(F_air))**(1/3)
+        F_air = F_s[m_air]
+        factor = (a / np.abs(F_air))**(2/3)
+        z0  = factor * W0[m_air]
+        zs  = factor * Ws_minus_V[m_air]
+        zp  = np.sign(F_air) * (a**2 * np.abs(F_air))**(1/3)
 
         Ai0, Aip0, Bi0, Bip0 = airy_all(z0, z_switch=z_switch)
         Ais, Aips, Bis, Bips = airy_all(zs, z_switch=z_switch)
 
-        E_a      = E[m_air]
-        V_a      = V_eff[m_air]
-        k1       = a * np.sqrt(np.maximum(E_a, 1e-3))
-        k3       = a * np.sqrt(np.maximum(E_a + V_a, 1e-12))
-        num      = (k3 / k1) * (4 / np.pi**2)
+        E_a = E[m_air]
+        V_a = V_eff[m_air]
+        k1  = a * np.sqrt(np.maximum(E_a, 1e-3))
+        k3  = a * np.sqrt(np.maximum(E_a + V_a, 1e-12))
+        num = (k3 / k1) * (4 / np.pi**2)
 
         t1 = Aip0*Bips - Aips*Bip0
         t2 = Ai0*Bis   - Ais*Bi0
         t3 = Ais*Bip0  - Aip0*Bis
         t4 = Ai0*Bips  - Aips*Bi0
 
-        denom = ((zp/k1)*t1 + (k3/zp)*t2)**2 \
-              + ((k3/k1)*t3 + t4)**2
+        denom = ((zp/k1)*t1 + (k3/zp)*t2)**2 + ((k3/k1)*t3 + t4)**2
         denom = np.where(np.abs(denom) < 1e-12, np.inf, denom)
 
         T[m_air] = num / denom
-        #T = np.maximum(T, 1e-30)
+
     return T
+
 
 
 def calibrate_fudge(phi_t, phi_s, F1,
@@ -578,41 +612,78 @@ def simulate(a):
         
     print('[save] current.h5 written with parameters')
 
-###############################################################################
-# CLI
-###############################################################################
+# ─── 2. HELPER: apply YAML to the parsed Namespace ───────────────────────────
+def _merge_yaml_into_args(yaml_path: str, parser: argparse.ArgumentParser,
+                          args: argparse.Namespace) -> argparse.Namespace:
+    """
+    Read yaml_path and copy keys under 'simulation:' into `args`.
+    Command-line overrides take precedence: if the user supplied a value that
+    differs from the parser default, keep that value.
+    """
+    with open(yaml_path, 'r') as f:
+        cfg = yaml.safe_load(f) or {}
 
+    sim_cfg = cfg.get('simulation', cfg)        # tolerate no top-level key
+    for k, v in sim_cfg.items():
+        k_cli = k.lower()                       # YAML uses Z_min → z_min
+        if not hasattr(args, k_cli):
+            continue                            # ignore unexpected keys
+        default_val = parser.get_default(k_cli)
+        current_val = getattr(args, k_cli)
+        # if the current value is still the default, replace it with YAML
+        if current_val == default_val:
+            setattr(args, k_cli, v)
+    return args
+
+# ─── 3. CLI: add --config flag and call the helper ───────────────────────────
 def cli():
     p = argparse.ArgumentParser()
+    # 3a) NEW flag – goes before the long list so it’s visible in --help
+    p.add_argument('--config', type=str,
+                   help='YAML file with a simulation: block of parameters')
+    # 3b) EXISTING options (unchanged) …
     p.add_argument('--n_E', type=int, default=100)
     p.add_argument('--n_V', type=int, default=100)
     p.add_argument('--n_Z', type=int, default=100)
     p.add_argument('--n_A', type=int, default=30)
     p.add_argument('--e_extra', type=np.float64, default=0.0)
-    p.add_argument('--v_min', type=np.float64, default=1.0)
+    p.add_argument('--v_min', type=np.float64, default=0.0)
     p.add_argument('--v_max', type=np.float64, default=10.0)
     p.add_argument('--z_min', type=np.float64, default=0.3)
     p.add_argument('--z_max', type=np.float64, default=5.0)
     p.add_argument('--A_min', type=np.float64, default=0.0)
     p.add_argument('--A_max', type=np.float64, default=5.0)
     p.add_argument('--phi_tip', type=np.float64, default=4.0)
-    p.add_argument('--phi_samp', type=np.float64, default=4.0)
+    p.add_argument('--phi_samp', type=np.float64, default=5.0)
     p.add_argument('--n_cheb', type=int, default=32)
     p.add_argument('--threads', type=int, default=-1)
-    p.add_argument('--out', type=str, default='C:/Users/willh/OneDrive/Desktop/FER_Simulation/fer_output')
-    p.add_argument('--force-rebuild-lut', action='store_true', help='Force rebuild of LUT even if compatible one exists')
-    p.add_argument('--list-luts', action='store_true', help='List existing LUT files and exit')
-    p.add_argument('--use-lut', action='store_true', default=True, help='Use LUT for transmission (default: direct calculation)')
-    p.add_argument('--upscale', type=int, default=1, help='Upscale LUT resolution by this factor (default: 1)')
-    p.add_argument('--upscale-z', type=int, help='Upscale z-axis resolution (overrides --upscale)')
-    p.add_argument('--upscale-v', type=int, help='Upscale voltage-axis resolution (overrides --upscale)')
-    p.add_argument('--upscale-e', type=int, help='Upscale energy-axis resolution (overrides --upscale)')
+    p.add_argument('--out', type=str,
+                   default='C:/Users/willh/OneDrive/Desktop/FER_Simulation/fer_output')
+    p.add_argument('--force-rebuild-lut', action='store_true',
+                   help='Force rebuild of LUT even if compatible one exists')
+    p.add_argument('--list-luts', action='store_true',
+                   help='List existing LUT files and exit')
+    p.add_argument('--use-lut', action='store_true', default=True,
+                   help='Use LUT for transmission (default: direct calculation)')
+    p.add_argument('--upscale', type=int, default=1,
+                   help='Upscale LUT resolution by this factor (default: 1)')
+    p.add_argument('--upscale-z', type=int,
+                   help='Upscale z-axis resolution (overrides --upscale)')
+    p.add_argument('--upscale-v', type=int,
+                   help='Upscale voltage-axis resolution (overrides --upscale)')
+    p.add_argument('--upscale-e', type=int,
+                   help='Upscale energy-axis resolution (overrides --upscale)')
+
+    # ---- PARSE once, then merge YAML defaults -------------------------------
     args = p.parse_args()
-    
+    args = _merge_yaml_into_args('fer_config.yaml', p, args)
+
+    # ---- Act on --list-luts early -------------------------------------------
     if args.list_luts:
-        list_existing_luts()
+        list_existing_luts(args.out)
         return
-    
+
+    # ---- Launch simulation ---------------------------------------------------
     t0 = time.perf_counter()
     simulate(args)
     print(f"[done] total runtime {time.perf_counter()-t0:.1f} s")

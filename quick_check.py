@@ -200,9 +200,9 @@ def quick_analysis(h5_path=None, a_val=None):
     print("2. Plotting d(log(I))/dV vs (Z, V)...")
     plot_dlogI_dV_vs_z_v(h5_path, a_val=a_val)
     
-    # Plot 3: Current profiles
-    print("3. Plotting current profiles vs voltage...")
-    plot_current_profiles(h5_path, a_val=a_val)
+    # Plot 3: Current profiles (DISABLED)
+    # print("3. Plotting current profiles vs voltage...")
+    # plot_current_profiles(h5_path, a_val=a_val)
     
     print("Quick analysis complete!")
 

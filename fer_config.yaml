@@ -1,0 +1,17 @@
+simulation:
+  Z_min: 0.3
+  Z_max: 5.0
+  n_Z: 100
+  V_min: 0.0
+  V_max: 10.0
+  n_V: 200
+  E_min: 0.01
+  E_max: 5.5
+  n_E: 100
+  A_min: 0.0
+  A_max: 5.0
+  n_A: 30
+  phi_tip: 4.0
+  phi_samp: 4.0
+  n_cheb: 32
+  out: fer_output 
