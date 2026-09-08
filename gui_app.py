@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
+from simulation_repository import SimulationData, load_simulation
 from simulation_service import SimulationConfig, SimulationRunner
 
 
@@ -20,9 +22,10 @@ TAB_NAMES = (
 def run_gui() -> int:
     """Launch the desktop application."""
     try:
-        from PySide6.QtCore import QObject, QThread, Signal, Slot
+        from PySide6.QtCore import QObject, QThread, QUrl, Signal, Slot
         from PySide6.QtWidgets import (
             QApplication,
+            QComboBox,
             QFileDialog,
             QFormLayout,
             QHBoxLayout,
@@ -37,9 +40,14 @@ def run_gui() -> int:
             QVBoxLayout,
             QWidget,
         )
+        try:
+            from PySide6.QtWebEngineWidgets import QWebEngineView
+        except ImportError:
+            QWebEngineView = None
     except ImportError as error:
         raise RuntimeError(
-            "PySide6 is required to run the GUI. Install dependencies first."
+            "PySide6 is required to run the GUI. Install it with:\n"
+            f"{sys.executable} -m pip install PySide6"
         ) from error
 
     class SimulationWorker(QObject):
@@ -67,11 +75,15 @@ def run_gui() -> int:
             self.thread = None
             self.worker = None
             self.current_artifact = None
+            self.simulated_data: SimulationData | None = None
+            self.simulated_plot_view = None
+            self.simulated_status = None
+            self.simulated_plot_file: Path | None = None
 
             self.tabs = QTabWidget()
             self.setCentralWidget(self.tabs)
             self._build_config_tab()
-            self._build_placeholder_tab("Simulated Data", "Select a simulation artifact to plot current, dI/dV, RF slices, and constant-current views.")
+            self._build_simulated_data_tab(QWebEngineView)
             self._build_placeholder_tab("Real Data", "Load measured spectra or fitted-peak CSV data for inspection and filtering.")
             self._build_placeholder_tab("Peak Extraction", "Configure smoothing and peak detection against real or simulated spectra.")
             self._build_placeholder_tab("RF Dependence", "Compare peak position and width against RF amplitude.")
@@ -137,6 +149,119 @@ def run_gui() -> int:
             select.clicked.connect(self._select_artifact)
             layout.addWidget(select)
             self.tabs.addTab(page, title)
+
+        def _build_simulated_data_tab(self, web_engine_view):
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            controls = QHBoxLayout()
+
+            select = QPushButton("Select HDF5")
+            select.clicked.connect(self._select_simulation_for_plot)
+            controls.addWidget(select)
+
+            self.simulated_view_type = QComboBox()
+            self.simulated_view_type.addItems(["Current surface", "Current heatmap"])
+            self.simulated_view_type.currentTextChanged.connect(self._render_simulated_plot)
+            controls.addWidget(self.simulated_view_type)
+
+            self.simulated_rf_selector = QComboBox()
+            self.simulated_rf_selector.currentIndexChanged.connect(self._render_simulated_plot)
+            controls.addWidget(self.simulated_rf_selector)
+            layout.addLayout(controls)
+
+            self.simulated_status = QLabel("Select a simulation HDF5 file to begin.")
+            layout.addWidget(self.simulated_status)
+
+            if web_engine_view is None:
+                self.simulated_plot_view = QLabel(
+                    "Qt WebEngine is unavailable. Install the complete PySide6 package "
+                    "to display interactive Plotly plots."
+                )
+                self.simulated_plot_view.setWordWrap(True)
+            else:
+                self.simulated_plot_view = web_engine_view()
+            layout.addWidget(self.simulated_plot_view, stretch=1)
+            self.tabs.addTab(page, "Simulated Data")
+
+        def _select_simulation_for_plot(self):
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select simulation artifact", "", "HDF5 files (*.h5)"
+            )
+            if not path:
+                return
+            try:
+                self.simulated_data = load_simulation(path)
+            except (FileNotFoundError, ValueError, OSError) as error:
+                self.simulated_data = None
+                self.simulated_status.setText(f"Could not load simulation: {error}")
+                return
+
+            self.current_artifact = Path(path)
+            self.simulated_rf_selector.blockSignals(True)
+            self.simulated_rf_selector.clear()
+            for index, amplitude in enumerate(self.simulated_data.rf_amplitude):
+                self.simulated_rf_selector.addItem(
+                    f"RF amplitude {amplitude:.4g} V", index
+                )
+            self.simulated_rf_selector.blockSignals(False)
+            self.simulated_status.setText(
+                f"Loaded {self.simulated_data.path.name}: "
+                f"{self.simulated_data.current.shape}"
+            )
+            self._render_simulated_plot()
+
+        def _render_simulated_plot(self, *_):
+            if self.simulated_data is None:
+                return
+            if not hasattr(self.simulated_plot_view, "setHtml"):
+                return
+
+            import plotly.graph_objects as go
+            from plotly.io import to_html
+
+            data = self.simulated_data
+            rf_index = self.simulated_rf_selector.currentData()
+            if rf_index is None:
+                rf_index = 0
+            current_slice = data.current[:, :, int(rf_index)]
+            rf_value = data.rf_amplitude[int(rf_index)]
+            title = f"Current at RF amplitude {rf_value:.4g} V"
+            if self.simulated_view_type.currentText() == "Current heatmap":
+                figure = go.Figure(go.Heatmap(
+                    z=current_slice,
+                    x=data.voltage,
+                    y=data.z,
+                    colorscale="Viridis",
+                    colorbar={"title": "Current"},
+                ))
+            else:
+                figure = go.Figure(go.Surface(
+                    z=current_slice,
+                    x=data.voltage,
+                    y=data.z,
+                    colorscale="Viridis",
+                    colorbar={"title": "Current"},
+                ))
+                figure.update_layout(
+                    scene={
+                        "xaxis_title": "Bias voltage (V)",
+                        "yaxis_title": "Tip height (nm)",
+                        "zaxis_title": "Current",
+                    }
+                )
+            figure.update_layout(title=title, margin={"l": 0, "r": 0, "t": 40, "b": 0})
+            html = to_html(figure, full_html=True, include_plotlyjs=True)
+            if self.simulated_plot_file is not None:
+                self.simulated_plot_file.unlink(missing_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".html", prefix="fer_sim_plot_",
+                encoding="utf-8", delete=False,
+            ) as plot_file:
+                plot_file.write(html)
+                self.simulated_plot_file = Path(plot_file.name)
+            self.simulated_plot_view.load(
+                QUrl.fromLocalFile(str(self.simulated_plot_file))
+            )
 
         def _choose_output(self):
             directory = QFileDialog.getExistingDirectory(self, "Choose output directory")
