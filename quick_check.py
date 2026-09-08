@@ -11,6 +11,7 @@ import plotly.express as px
 from pathlib import Path
 import argparse
 from h5_utilities import find_latest_simulation_file
+from simulation_repository import load_simulation
 
 
 def load_simulation_data(h5_path=None):
@@ -18,14 +19,11 @@ def load_simulation_data(h5_path=None):
     if h5_path is None:
         h5_path = find_latest_simulation_file()
         print(f"[INFO] Using simulation file: {h5_path}")
-    if not Path(h5_path).exists():
-        raise FileNotFoundError(f"Simulation file not found: {h5_path}")
-    
-    with h5py.File(h5_path, "r") as f:
-        I_cube = f["I"][...]           # current (nZ, nV, nA)
-        z_values = f["z"][...]         # tip-height axis
-        V_values = f["V"][...]         # bias axis
-        A_values = f["A_rf"][...]      # RF amplitude axis
+    data = load_simulation(h5_path)
+    I_cube = data.current
+    z_values = data.z
+    V_values = data.voltage
+    A_values = data.rf_amplitude
         
     return I_cube, z_values, V_values, A_values
 

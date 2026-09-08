@@ -353,7 +353,7 @@ def _upscaled_axis(values, factor):
     return np.linspace(values[0], values[-1], (values.size - 1) * factor + 1)
 
 
-def build_lut(Eg, Vg, zg, phi_t, phi_s, upscale=1, fudge=1):
+def build_lut(Eg, Vg, zg, phi_t, phi_s, upscale=1, fudge=1, n_jobs=-1):
     """
     Build a transmission lookup table over (z,V,E), with optional upscaling.
 
@@ -385,15 +385,15 @@ def build_lut(Eg, Vg, zg, phi_t, phi_s, upscale=1, fudge=1):
 
     # prepare output
     lut = np.empty((len(z_lut), len(V_lut), len(E_lut)), dtype=np.float64)
+    Vmesh, Emesh = np.meshgrid(V_lut, E_lut, indexing='ij')
 
     def _calc_z(i, zval):
         print(f"  [LUT] {i+1}/{len(z_lut)} z={zval:.2f} nm")
-        Vmesh, Emesh = np.meshgrid(V_lut, E_lut, indexing='ij')
         D = transmission(Emesh, Vmesh, zval, phi_t, phi_s, fudge=fudge).astype(np.float64)
         return i, D
 
     # parallel compute per z-layer
-    results = Parallel(n_jobs=-1)(delayed(_calc_z)(i, z) for i, z in enumerate(z_lut))
+    results = Parallel(n_jobs=n_jobs)(delayed(_calc_z)(i, z) for i, z in enumerate(z_lut))
     for idx, D_slice in results:  # type: ignore
         lut[idx] = D_slice
 
@@ -441,9 +441,9 @@ def interp_lut(lut, Eg, Vg, zg):
     return RegularGridInterpolator((zg, Vg, Eg), lut, bounds_error=False, fill_value=0.0)
 
 
-def D_avg(interp, Eg, Vdc, Arf, z, nodes):
+def D_avg(interp, Eg, Vdc, Arf, z, cos_nodes):
     """RF‑averaged D(E) using precomputed LUT interpolator."""
-    V_inst = Vdc + Arf * np.cos(nodes)              # (N,)
+    V_inst = Vdc + Arf * cos_nodes                  # (N,)
     nE, nN = Eg.size, V_inst.size
     # repeat grids so shapes match
     E_rep = np.repeat(Eg, nN)                      # (nE*nN,)
@@ -465,10 +465,113 @@ def current(D_E, Eg, Vdc):
     if np.any(np.diff(Eg) <= 0):
         raise ValueError("Eg must be strictly increasing")
 
-    mask = Eg < (E_F - Vdc)
-    p1 = np.trapezoid(Vdc*D_E[mask], Eg[mask]) if mask.any() else 0.0
-    p2 = np.trapezoid((E_F - Eg[~mask])*D_E[~mask], Eg[~mask]) if (~mask).any() else 0.0
-    return p1 + p2
+    bias_sign = np.sign(Vdc)
+    bias = abs(Vdc)
+    domain = (Eg >= 0.0) & (Eg <= E_F)
+    energy = Eg[domain]
+    transmission_values = D_E[domain]
+    mask = energy < (E_F - bias)
+    p1 = np.trapezoid(bias * transmission_values[mask], energy[mask]) if mask.any() else 0.0
+    p2 = np.trapezoid(
+        (E_F - energy[~mask]) * transmission_values[~mask],
+        energy[~mask],
+    ) if (~mask).any() else 0.0
+    return bias_sign * (p1 + p2)
+
+
+def current_batch(D_E, Eg, Vdc):
+    """Evaluate ``current`` for a batch of transmission spectra.
+
+    ``D_E`` has shape ``(..., n_E)`` and ``Vdc`` has the matching leading
+    shape. The interval masks reproduce the point-selection behavior of
+    ``current`` without constructing an interpolator or Python loop per phase.
+    """
+    D_E = np.asarray(D_E, dtype=np.float64)
+    Eg = np.asarray(Eg, dtype=np.float64)
+    Vdc = np.asarray(Vdc, dtype=np.float64)
+    if D_E.ndim < 2 or Eg.ndim != 1 or D_E.shape[-1] != Eg.size:
+        raise ValueError("D_E must end with an energy axis matching Eg")
+    if Vdc.shape != D_E.shape[:-1]:
+        raise ValueError("Vdc must match the leading D_E dimensions")
+    if not (np.all(np.isfinite(D_E)) and np.all(np.isfinite(Eg)) and np.all(np.isfinite(Vdc))):
+        raise ValueError("D_E, Eg, and Vdc must contain only finite values")
+    if np.any(np.diff(Eg) <= 0):
+        raise ValueError("Eg must be strictly increasing")
+
+    domain = (Eg >= 0.0) & (Eg <= E_F)
+    if not np.all(domain):
+        D_E = D_E[..., domain]
+        Eg = Eg[domain]
+
+    bias = np.abs(Vdc)
+    below = Eg[None, ...] < (E_F - bias[..., None])
+    lower_intervals = below[..., :-1] & below[..., 1:]
+    upper_intervals = ~below[..., :-1] & ~below[..., 1:]
+    delta_E = np.diff(Eg)
+
+    lower_values = bias[..., None] * D_E
+    upper_values = (E_F - Eg) * D_E
+    lower_integral = np.sum(
+        0.5 * (lower_values[..., :-1] + lower_values[..., 1:])
+        * delta_E * lower_intervals,
+        axis=-1,
+    )
+    upper_integral = np.sum(
+        0.5 * (upper_values[..., :-1] + upper_values[..., 1:])
+        * delta_E * upper_intervals,
+        axis=-1,
+    )
+    return np.sign(Vdc) * (lower_integral + upper_integral)
+
+
+def direct_rf_current_grid(Eg, Vg, Ag, z, phi_tip, phi_samp,
+                           fudge, cos_nodes, amplitude_chunk=8):
+    """Compute one height's RF current grid with batched direct transmission."""
+    Eg = np.asarray(Eg, dtype=np.float64)
+    Vg = np.asarray(Vg, dtype=np.float64)
+    Ag = np.asarray(Ag, dtype=np.float64)
+    cos_nodes = np.asarray(cos_nodes, dtype=np.float64)
+    if amplitude_chunk < 1:
+        raise ValueError("amplitude_chunk must be positive")
+
+    result = np.empty((Vg.size, Ag.size), dtype=np.float64)
+    energy_grid = Eg[None, None, None, :]
+    voltage_grid = Vg[:, None, None, None] + (
+        Ag[None, :, None, None] * cos_nodes[None, None, :, None]
+    )
+    for start in range(0, Ag.size, amplitude_chunk):
+        stop = min(start + amplitude_chunk, Ag.size)
+        voltages = voltage_grid[:, start:stop, :, :]
+        transmissions = transmission(
+            energy_grid, voltages, z, phi_tip, phi_samp, fudge=fudge,
+        )
+        phase_voltages = voltages[..., 0]
+        phase_currents = current_batch(
+            transmissions, Eg, phase_voltages,
+        )
+        result[:, start:stop] = np.mean(phase_currents, axis=-1)
+    return result
+
+
+def rf_averaged_current(transmission_at_voltage, Eg, Vdc, Arf, cos_nodes):
+    """Average the full instantaneous current over RF phase nodes.
+
+    ``transmission_at_voltage`` must return transmission over ``Eg`` for one
+    instantaneous voltage. Averaging after current integration preserves the
+    voltage-dependent occupation window for each RF phase.
+    """
+    cos_nodes = np.asarray(cos_nodes, dtype=np.float64)
+    if cos_nodes.ndim != 1 or cos_nodes.size == 0:
+        raise ValueError("cos_nodes must be a non-empty one-dimensional array")
+    if not (np.isfinite(Vdc) and np.isfinite(Arf)):
+        raise ValueError("Vdc and Arf must be finite")
+
+    phase_currents = [
+        current(transmission_at_voltage(Vdc + Arf * cosine), Eg,
+                Vdc + Arf * cosine)
+        for cosine in cos_nodes
+    ]
+    return float(np.mean(phase_currents))
 
 
 ###############################################################################
@@ -481,6 +584,7 @@ def simulate(a):
     zg = np.linspace(a.z_min, a.z_max, a.n_Z)
     Ag = np.linspace(a.A_min, a.A_max, a.n_A)
     nodes = np.pi*(2*np.arange(1, a.n_cheb+1)-1)/(2*a.n_cheb)
+    cos_nodes = np.cos(nodes)
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     
     dV = (a.v_max-a.v_min)/(a.n_V - 1)
@@ -533,7 +637,10 @@ def simulate(a):
         
         if rebuild_lut:
             print(f'[build] LUT with upscaling factors: z={upscale_z}, v={upscale_v}, e={upscale_e}')
-            lut = build_lut(Eg, Vg_lut, zg, a.phi_tip, a.phi_samp, upscale=upscale_factors, fudge=fudge)
+            lut = build_lut(
+                Eg, Vg_lut, zg, a.phi_tip, a.phi_samp,
+                upscale=upscale_factors, fudge=fudge, n_jobs=a.threads,
+            )
             with h5py.File(lut_file, 'w') as f:
                 f.create_dataset('D', data=lut, compression='gzip')
                 f.create_dataset('E', data=E_lut)
@@ -549,8 +656,17 @@ def simulate(a):
             r = np.zeros((len(Vg), len(Ag)))
             for j,Vdc in enumerate(Vg):
                 for k,Ar in enumerate(Ag):
-                    D_bar = D_avg(interp, Eg, Vdc, Ar, z, nodes)
-                    r[j,k] = current(D_bar, Eg, Vdc)
+                    def lut_transmission(voltage):
+                        points = np.column_stack((
+                            np.full(Eg.shape, z),
+                            np.full(Eg.shape, voltage),
+                            Eg,
+                        ))
+                        return interp(points)
+
+                    r[j,k] = rf_averaged_current(
+                        lut_transmission, Eg, Vdc, Ar, cos_nodes,
+                    )
             return i,r
         
         res = Parallel(n_jobs=a.threads)(delayed(_row)(i,z) for i,z in enumerate(zg))  # type: ignore
@@ -559,17 +675,10 @@ def simulate(a):
         I = np.zeros((len(zg), len(Vg), len(Ag)))
         def _row(i,z):
             print(f"  [I] z {i+1}/{len(zg)} (direct)")
-            r = np.zeros((len(Vg), len(Ag)))
-            for j,Vdc in enumerate(Vg):
-                for k,Ar in enumerate(Ag):
-                    V_inst = Vdc + Ar * np.cos(nodes)
-                    D_bar = np.zeros_like(Eg)
-                    for idx_E, E in enumerate(Eg):
-                        E_arr = np.full_like(V_inst, E)
-                        z_arr = np.full_like(V_inst, z)
-                        T_vals = transmission(E_arr, V_inst, z_arr, a.phi_tip, a.phi_samp)
-                        D_bar[idx_E] = T_vals.mean()
-                    r[j,k] = current(D_bar, Eg, Vdc)
+            r = direct_rf_current_grid(
+                Eg, Vg, Ag, z, a.phi_tip, a.phi_samp,
+                fudge, cos_nodes,
+            )
             return i,r
         res = Parallel(n_jobs=a.threads)(delayed(_row)(i,z) for i,z in enumerate(zg))  # type: ignore
         for i,r in res: I[i]=r  # type: ignore
@@ -596,12 +705,15 @@ def simulate(a):
         f.attrs['use_lut'] = getattr(a, 'use_lut', False)
         f.attrs['fudge_factor'] = fudge
         f.attrs['E_F'] = E_F
+        f.attrs['current_units'] = 'normalized'
+        f.attrs['current_prefactor'] = 1.0
         
         # Grid information
         f.attrs['dV'] = dV
         f.attrs['n_V_lut'] = len(Vg_lut)
         
-    print('[save] current.h5 written with parameters')
+    print(f'[save] {current_file} written with parameters')
+    return current_file
 
 # ─── 2. HELPER: apply YAML to the parsed Namespace ───────────────────────────
 def _merge_yaml_into_args(yaml_path: str, parser: argparse.ArgumentParser,
@@ -663,10 +775,10 @@ def cli():
                    help='List existing LUT files and exit')
     lut_mode = p.add_mutually_exclusive_group()
     lut_mode.add_argument('--use-lut', dest='use_lut', action='store_true',
-                          help='Use the transmission LUT (default)')
+                          help='Use the transmission LUT')
     lut_mode.add_argument('--no-lut', '--no-use-lut', dest='use_lut', action='store_false',
                           help='Calculate transmission directly')
-    p.set_defaults(use_lut=True)
+    p.set_defaults(use_lut=False)
     p.add_argument('--upscale', type=int, default=1,
                    help='Upscale LUT resolution by this factor (default: 1)')
     p.add_argument('--upscale-z', type=int,
@@ -698,10 +810,7 @@ def cli():
 
 if __name__ == '__main__':
     print('Begin simulation...')
-    cli()
+    output_file = cli()
     print('Simulation done')
-    # Automatically run quick_check.py after simulation
-    import subprocess
-    print('Running quick_check.py for immediate analysis...')
-    subprocess.run(['python', 'quick_check.py'])
-    # os.system('git push')
+    if output_file is not None:
+        print(f'Output: {output_file}')

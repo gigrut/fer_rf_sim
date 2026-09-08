@@ -13,7 +13,7 @@ import numpy as np
 
 from h5_utilities import find_latest_simulation_file
 
-def run_simulation(use_lut=True, quick_test=False):
+def run_simulation(use_lut=False, quick_test=False):
     """Run the main simulation."""
     print("=" * 60)
     print("STEP 1: Running FER Simulation")
@@ -41,7 +41,9 @@ def run_simulation(use_lut=True, quick_test=False):
     
     if use_lut:
         cmd.append("--use-lut")
-        print("Using LUT for faster computation...")
+        print("Using the transmission LUT...")
+    else:
+        print("Using the vectorized direct calculation...")
     
     print(f"Command: {' '.join(cmd)}")
     print()
@@ -126,8 +128,10 @@ def run_advanced_plots():
 
 def main():
     parser = argparse.ArgumentParser(description="FER Simulation Workflow")
-    parser.add_argument("--no-lut", action="store_true", 
-                       help="Disable LUT usage (slower but more accurate)")
+    parser.add_argument("--no-lut", action="store_true",
+                       help="Deprecated compatibility flag; direct calculation is already the default")
+    parser.add_argument("--use-lut", action="store_true",
+                       help="Use the transmission LUT instead of direct calculation")
     parser.add_argument("--quick-test", action="store_true",
                        help="Run with reduced grid sizes for quick testing")
     parser.add_argument("--skip-simulation", action="store_true",
@@ -157,7 +161,10 @@ def main():
     
     # Step 1: Simulation
     if 'simulation' in steps_to_run and not args.skip_simulation:
-        success = run_simulation(use_lut=not args.no_lut, quick_test=args.quick_test)
+        success = run_simulation(
+            use_lut=args.use_lut and not args.no_lut,
+            quick_test=args.quick_test,
+        )
         if not success:
             print("\n✗ Workflow stopped due to simulation failure.")
             return 1

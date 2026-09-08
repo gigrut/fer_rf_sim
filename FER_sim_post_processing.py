@@ -1,32 +1,35 @@
 import numpy as np
-import pandas as pd
-import h5py
-import plotly.graph_objects as go
-from scipy.interpolate import RegularGridInterpolator, interp1d
+from scipy.interpolate import RegularGridInterpolator
 import argparse
-# Note: constant_current_slice and build_constant_current_4D are defined in this file
-# The plotting functions from FER_plotter are not available in the current version
+from pathlib import Path
+
+from h5_utilities import find_latest_simulation_file
+from simulation_repository import load_simulation
 
 # ------------------------------------------------------------------------------
-# Load the simulation output (must run FER_constant_current_simulation.py first)
+# Load simulation data only when explicitly requested. Importing this module must
+# remain safe for GUI and test callers.
 # ------------------------------------------------------------------------------
 
-H5_PATH = "fer_output/current.h5"
+def build_current_array(I_cube, V_values):
+    """Return channels ``[..., 0] = I`` and ``[..., 1] = dI/dV``."""
+    I_cube = np.asarray(I_cube, dtype=np.float64)
+    V_values = np.asarray(V_values, dtype=np.float64)
+    if I_cube.ndim != 3 or V_values.ndim != 1:
+        raise ValueError("I_cube must be 3D and V_values must be 1D")
+    if I_cube.shape[1] != V_values.size:
+        raise ValueError("V_values must match the voltage axis of I_cube")
+    dI_dV_cube = np.gradient(I_cube, V_values, axis=1)
+    return np.stack([I_cube, dI_dV_cube], axis=-1)
 
-with h5py.File(H5_PATH, "r") as f:
-    # I has shape (nD, nV, nA)
-    I_cube     = f["I"][...]           # current
-    D_values   = f["z"][...]           # tip-height axis
-    V_values   = f["V"][...]           # bias axis
-    A_values   = f["A_rf"][...]        # RF amplitude axis
 
-# Compute dI/dV by finite‐difference along the V axis
-# shape will be exactly (nD, nV, nA)
-dI_dV_cube = np.gradient(I_cube, V_values, axis=1)
-
-# Build the full 4D array (nD, nV, nA, 2)
-#   [:,:,:,0] = I, [:,:,:,1] = dI/dV
-current_array = np.stack([I_cube, dI_dV_cube], axis=-1)
+def load_post_processing_data(h5_path=None):
+    """Load one artifact and derive the current/dI/dV analysis array."""
+    if h5_path is None:
+        h5_path = find_latest_simulation_file()
+    data = load_simulation(h5_path)
+    current_array = build_current_array(data.current, data.voltage)
+    return data.path, data.z, data.voltage, data.rf_amplitude, current_array
 
 
 def upsample_current_array(current_array, D_values, V_values, A_values,
@@ -63,6 +66,9 @@ def upsample_current_array(current_array, D_values, V_values, A_values,
     up : np.ndarray, shape (nD*factor_D, nV*factor_V, nA*factor_A, 2)
         Interpolated array with I and dI/dV on the finer grid.
     """
+    factors = (factor_D, factor_V, factor_A)
+    if any(not isinstance(factor, (int, np.integer)) or factor < 1 for factor in factors):
+        raise ValueError("upsampling factors must be positive integers")
     nD, nV, nA, _ = current_array.shape
     new_nD = nD * factor_D
     new_nV = nV * factor_V
@@ -111,32 +117,34 @@ def invert_current_for_constant_I_4D_vectorized(I_target, D_vals, M):
         Interpolated dI/dV at those tip heights.
     """
     nD,nV,nA,_ = M.shape
-    Dt = np.empty((nV,nA))
-    dIdVt = np.empty((nV,nA))
+    if D_vals.ndim != 1 or D_vals.size != nD:
+        raise ValueError("D_vals must match the first dimension of M")
+    if np.any(np.diff(D_vals) <= 0):
+        raise ValueError("D_vals must be strictly increasing")
+    Dt = np.full((nV,nA), np.nan)
+    dIdVt = np.full((nV,nA), np.nan)
     for j in range(nV):
         for k in range(nA):
             I_vs_D    = M[:,j,k,0]
             dIdV_vs_D = M[:,j,k,1]
             D_axis    = D_vals
 
-            # ensure monotonic increasing I(D)
+            # Ensure a strictly monotonic current curve before inversion.
             if I_vs_D[0] > I_vs_D[-1]:
                 I_vs_D    = I_vs_D[::-1]
                 dIdV_vs_D = dIdV_vs_D[::-1]
                 D_axis    = D_axis[::-1]
+            if np.any(np.diff(I_vs_D) <= 0):
+                continue
+            if not I_vs_D[0] <= I_target <= I_vs_D[-1]:
+                continue
 
             # invert current to find D
-            f_inv = interp1d(I_vs_D, D_axis,
-                             bounds_error=False,
-                             fill_value="extrapolate")
-            Di = f_inv(I_target)
+            Di = np.interp(I_target, I_vs_D, D_axis)
             Dt[j,k] = Di
 
             # interpolate dI/dV at that D
-            f_didv = interp1d(D_axis, dIdV_vs_D,
-                              bounds_error=False,
-                              fill_value="extrapolate")
-            dIdVt[j,k] = f_didv(Di)
+            dIdVt[j,k] = np.interp(Di, D_axis, dIdV_vs_D)
     return Dt, dIdVt
 
 
@@ -191,58 +199,39 @@ def build_constant_current_4D(I_target_list, D_vals, M):
 ###################################################
 
 
-if __name__ == "__main__":
-    # first upsample if you like:
-    upsample = False
-    if upsample:
-        print('Begin upsampling')
-        D, V, A, curr = upsample_current_array(
-            current_array, D_values, V_values, A_values,
-            factor_D=1, factor_V=1, factor_A=1
+def main():
+    parser = argparse.ArgumentParser(description="Simulation post-processing")
+    parser.add_argument(
+        "--h5-path",
+        help="Simulation artifact to analyze (defaults to the newest output)",
+    )
+    parser.add_argument(
+        "--I-target",
+        type=float,
+        help="Optional normalized current target for constant-current analysis",
+    )
+    parser.add_argument("--factor-D", type=int, default=1)
+    parser.add_argument("--factor-V", type=int, default=1)
+    parser.add_argument("--factor-A", type=int, default=1)
+    args = parser.parse_args()
+
+    path, D, V, A, current_array = load_post_processing_data(args.h5_path)
+    if max(args.factor_D, args.factor_V, args.factor_A) > 1:
+        D, V, A, current_array = upsample_current_array(
+            current_array, D, V, A,
+            factor_D=args.factor_D,
+            factor_V=args.factor_V,
+            factor_A=args.factor_A,
         )
-        print('Done upsampling')
-    else:
-        D, V, A, curr = D_values, V_values, A_values, current_array
 
-    # pick some target currents and A‐slice
-    I_targets = np.logspace(-10, -6, 50)
-    I_small_list = np.array([1E-10, 1E-9, 1E-8])
-    Z_small_list = D[::20]
-    
-    cc4 = build_constant_current_4D(I_targets, D_values, current_array)
+    print(f"Loaded: {path}")
+    print(f"Current shape: {current_array[..., 0].shape}")
+    print(f"Axes: z={D.size}, V={V.size}, A={A.size}")
+    if args.I_target is not None:
+        result = constant_current_slice(args.I_target, D, current_array)
+        print(f"Constant-current slice shape: {result.shape}")
+        print(f"Valid heights: {np.count_nonzero(np.isfinite(result[..., 0]))}")
 
 
-    print('Plotting...')
-    Z_vs_V=1
-    if Z_vs_V:
-        plot_Z_vs_V_at_constant_I_and_A(curr, D, V, A, I_targets, x_bounds=[1,10])
-    
-    vol=0
-    if vol:
-        plot_current_and_dIdV_volume(curr, D, V, A, plot_curr=False, plot_dIdV=True,
-                                    opacity=0.5, opacityscale='uniform', 
-                                    iso_range=[5, 99] ,surface_count=5, log=True, caps=False)
-    dIdV_vs_V=1
-    if dIdV_vs_V:
-        plot_dIdV_vs_V_at_constant_I_and_A(curr, D, V, A, I_small_list, y_bounds=[1,10])
-
-    dIdV_CC_heatmap=1
-    if dIdV_CC_heatmap:
-        print('Plotting CC heatmap')
-        plot_dIdV_heatmap_CC_slider(
-            current_array, D_values, V_values, A_values,
-            I_targets=I_targets, x_bounds=[1,10])
-    
-    dIdV_CH_heatmap=0
-    if dIdV_CH_heatmap:  
-        print('Plotting CH heatmap')
-        plot_dIdV_heatmap_CH_slider(curr, D, V, A,
-                                    D, x_bounds=[1,10], log_scale=True)
-        
-        
-    isosurface=0
-    if isosurface:
-        plot_constant_current_isosurface(cc4, curr, D, V, A,
-                                        I_targets=[1e-10])
-
-    print('Done')
+if __name__ == "__main__":
+    main()

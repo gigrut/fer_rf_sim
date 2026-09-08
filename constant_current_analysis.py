@@ -5,23 +5,19 @@ Calculates dI/dV vs V at constant current levels.
 """
 
 import numpy as np
-import h5py
 import plotly.graph_objects as go
 import plotly.express as px
 from scipy.interpolate import interp1d
-from pathlib import Path
 import argparse
+from simulation_repository import load_simulation
 
 def load_simulation_data(h5_path="fer_output/current.h5"):
     """Load simulation data from HDF5 file."""
-    if not Path(h5_path).exists():
-        raise FileNotFoundError(f"Simulation file not found: {h5_path}")
-    
-    with h5py.File(h5_path, "r") as f:
-        I_cube = f["I"][...]           # current (nZ, nV, nA)
-        z_values = f["z"][...]         # tip-height axis
-        V_values = f["V"][...]         # bias axis
-        A_values = f["A_rf"][...]      # RF amplitude axis
+    data = load_simulation(h5_path)
+    I_cube = data.current
+    z_values = data.z
+    V_values = data.voltage
+    A_values = data.rf_amplitude
         
     return I_cube, z_values, V_values, A_values
 

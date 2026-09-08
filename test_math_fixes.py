@@ -15,10 +15,22 @@ from FER_constant_current_simulation import (
     airy_all, 
     transmission, 
     calibrate_fudge,
-    current
+    current,
+    current_batch,
+    D_avg,
+    rf_averaged_current,
+    direct_rf_current_grid,
 )
 
 import run_workflow
+from simulation_service import SimulationConfig, SimulationRunner
+from simulation_repository import SimulationRepository
+from FER_sim_post_processing import (
+    build_current_array,
+    constant_current_slice,
+    upsample_current_array,
+)
+from peak_analysis_service import detect_peaks
 
 
 def test_run_workflow_accepts_parameterized_sim_output(tmp_path, monkeypatch):
@@ -55,6 +67,110 @@ def test_run_workflow_requires_no_legacy_current_file(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     assert run_workflow.run_constant_current_analysis(1e-9) is True
+
+
+def test_simulation_config_validates_and_preserves_settings():
+    config = SimulationConfig(
+        n_E=12, n_V=4, n_Z=2, n_A=3, n_cheb=5,
+        phi_tip=4.2, out="results",
+    )
+    config.validate()
+    namespace = config.as_namespace()
+    assert namespace.n_E == 12
+    assert namespace.phi_tip == 4.2
+    assert namespace.out == "results"
+
+    with pytest.raises(ValueError, match="at least 2"):
+        SimulationConfig(n_V=1).validate()
+
+
+def test_simulation_runner_returns_artifact_path(monkeypatch, tmp_path):
+    expected = tmp_path / "current.h5"
+
+    def fake_simulate(namespace):
+        assert namespace.n_E == 8
+        return expected
+
+    monkeypatch.setattr("simulation_service.simulate", fake_simulate)
+    config = SimulationConfig(n_E=8, n_V=2, n_Z=2, n_A=1, n_cheb=2)
+    assert SimulationRunner().run(config) == expected
+
+
+def test_simulation_repository_loads_arrays_and_metadata(tmp_path):
+    import h5py
+
+    artifact = tmp_path / "simulation.h5"
+    current = np.zeros((2, 3, 1))
+    with h5py.File(artifact, "w") as file:
+        file.create_dataset("I", data=current)
+        file.create_dataset("z", data=[0.3, 1.0])
+        file.create_dataset("V", data=[0.0, 1.0, 2.0])
+        file.create_dataset("A_rf", data=[0.0])
+        file.attrs["current_units"] = "normalized"
+
+    data = SimulationRepository().load(artifact)
+    assert data.path == artifact
+    assert data.current.shape == (2, 3, 1)
+    assert data.metadata["current_units"] == "normalized"
+
+
+def test_simulation_repository_rejects_axis_mismatch(tmp_path):
+    import h5py
+
+    artifact = tmp_path / "invalid.h5"
+    with h5py.File(artifact, "w") as file:
+        file.create_dataset("I", data=np.zeros((2, 3, 1)))
+        file.create_dataset("z", data=[0.3])
+        file.create_dataset("V", data=[0.0, 1.0, 2.0])
+        file.create_dataset("A_rf", data=[0.0])
+
+    with pytest.raises(ValueError, match="does not match axes"):
+        SimulationRepository().load(artifact)
+
+
+def test_post_processing_builds_derivative_without_import_file_io():
+    voltage = np.linspace(0.0, 2.0, 3)
+    current_cube = np.broadcast_to(voltage[None, :, None], (2, 3, 1)).copy()
+    result = build_current_array(current_cube, voltage)
+    assert result.shape == (2, 3, 1, 2)
+    assert np.allclose(result[..., 0], current_cube)
+    assert np.allclose(result[..., 1], 1.0)
+
+
+def test_post_processing_constant_current_rejects_extrapolation():
+    heights = np.array([0.3, 1.0, 2.0])
+    voltage = np.array([0.0, 1.0])
+    amplitudes = np.array([0.0])
+    current_cube = heights[:, None, None] * np.ones((1, 2, 1))
+    data = build_current_array(current_cube, voltage)
+    result = constant_current_slice(3.0, heights, data)
+    assert np.all(np.isnan(result))
+
+
+def test_post_processing_upsampling_validates_factors():
+    current_array = np.zeros((2, 2, 1, 2))
+    with pytest.raises(ValueError, match="positive integers"):
+        upsample_current_array(
+            current_array, np.array([0.3, 1.0]),
+            np.array([0.0, 1.0]), np.array([0.0]), factor_D=0,
+        )
+
+
+def test_peak_analysis_returns_positions_and_widths():
+    x = np.linspace(0.0, 10.0, 1001)
+    y = np.exp(-((x - 3.0) / 0.3) ** 2) + 0.5 * np.exp(-((x - 7.0) / 0.5) ** 2)
+    result = detect_peaks(x, y, prominence=0.1)
+    assert np.allclose(result.position, [3.0, 7.0], atol=0.02)
+    assert np.all(result.width > 0)
+    assert result.height[0] > result.height[1]
+
+
+def test_peak_analysis_validates_polarity_and_axis():
+    x = np.array([0.0, 1.0, 2.0])
+    with pytest.raises(ValueError, match="strictly increasing"):
+        detect_peaks(x[[0, 2, 1]], np.array([0.0, 1.0, 0.0]))
+    with pytest.raises(ValueError, match="polarity"):
+        detect_peaks(x, np.array([0.0, 1.0, 0.0]), polarity="both")
 
 def test_cardano_solver():
     """Test the Cardano solver with edge cases."""
@@ -184,14 +300,97 @@ def test_current_calculation():
     I_zero = current(np.zeros_like(D_E), Eg, Vdc)
     print(f"Zero transmission current: {I_zero}")
     assert I_zero == 0.0, "Zero transmission should give zero current"
+
+    # The current kernel should reverse sign for a reversed bias when the
+    # transmission spectrum is held fixed.
+    assert current(D_E, Eg, -Vdc) == pytest.approx(-I)
     
     # Non-finite transmission must be rejected instead of silently integrated.
     D_E_nan = D_E.copy()
     D_E_nan[2] = np.nan
     with pytest.raises(ValueError, match="finite"):
         current(D_E_nan, Eg, Vdc)
+
+    # Energies above the modeled Fermi level must not contribute negatively.
+    Eg_extended = np.array([0.1, 1.0, 5.5, 6.0])
+    D_extended = np.ones_like(Eg_extended)
+    assert current(D_extended, Eg_extended, 1.0) == pytest.approx(
+        current(np.ones(3), Eg_extended[:3], 1.0)
+    )
     
     print("✓ Current calculation tests passed")
+
+
+def test_d_avg_uses_precomputed_cosines():
+    """RF averaging should consume cosine nodes, not cosine angles."""
+    class VoltageInterpolator:
+        def __call__(self, points):
+            return points[:, 1]
+
+    energy = np.array([1.0, 2.0])
+    cos_nodes = np.array([-1.0, 0.0, 1.0])
+    averaged = D_avg(VoltageInterpolator(), energy, 2.0, 0.5, 1.0, cos_nodes)
+    assert np.allclose(averaged, 2.0)
+
+
+def test_rf_averaging_integrates_current_at_each_instantaneous_voltage():
+    """RF averaging must include the instantaneous occupation window."""
+    energy = np.linspace(0.0, 5.5, 1001)
+    cos_nodes = np.array([-1.0, 0.0, 1.0])
+
+    def unit_transmission(_voltage):
+        return np.ones_like(energy)
+
+    averaged = rf_averaged_current(
+        unit_transmission, energy, Vdc=0.5, Arf=0.25, cos_nodes=cos_nodes,
+    )
+    phase_values = [
+        current(np.ones_like(energy), energy, voltage)
+        for voltage in (0.25, 0.5, 0.75)
+    ]
+    assert averaged == pytest.approx(np.mean(phase_values))
+    assert averaged != pytest.approx(current(np.ones_like(energy), energy, 0.5))
+
+
+def test_current_batch_matches_scalar_current():
+    """The batched integration must preserve scalar current results."""
+    energy = np.linspace(0.0, 5.5, 101)
+    spectra = np.stack([
+        np.exp(-energy),
+        0.5 * np.exp(-0.5 * energy),
+    ])
+    voltages = np.array([0.25, 1.0])
+    batched = current_batch(spectra, energy, voltages)
+    expected = np.array([
+        current(spectrum, energy, voltage)
+        for spectrum, voltage in zip(spectra, voltages)
+    ])
+    assert np.allclose(batched, expected)
+
+
+def test_direct_rf_grid_matches_scalar_rf_average():
+    """The batched direct grid must match the correctness-first RF helper."""
+    energy = np.linspace(0.01, 5.5, 41)
+    voltages = np.array([0.5, 1.0])
+    amplitudes = np.array([0.0, 0.25])
+    cos_nodes = np.cos(np.linspace(0.2, 2.8, 5))
+    actual = direct_rf_current_grid(
+        energy, voltages, amplitudes, 1.0, 4.0, 4.0,
+        fudge=3.8157756623464034, cos_nodes=cos_nodes, amplitude_chunk=1,
+    )
+    expected = np.empty_like(actual)
+    for j, voltage in enumerate(voltages):
+        for k, amplitude in enumerate(amplitudes):
+            def direct_transmission(instantaneous_voltage):
+                return transmission(
+                    energy, instantaneous_voltage, 1.0, 4.0, 4.0,
+                    fudge=3.8157756623464034,
+                )
+
+            expected[j, k] = rf_averaged_current(
+                direct_transmission, energy, voltage, amplitude, cos_nodes,
+            )
+    assert np.allclose(actual, expected)
 
 def test_fudge_calibration():
     """Test fudge factor calibration with edge cases."""
