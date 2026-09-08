@@ -14,4 +14,10 @@ simulation:
   phi_tip: 4.0
   phi_samp: 4.0
   n_cheb: 32
-  out: fer_output 
+  out: fer_output
+
+real_data:
+  # Set this to a local CSV or folder, or use FER_REAL_DATA_CSV instead.
+  csv_path: C:/Users/willh/OneDrive/Desktop/Data/z_dependent_fer_shift_csv
+  setpoint: 1000
+  peak_number: 1

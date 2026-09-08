@@ -17,6 +17,8 @@ from scipy.special import airy as sp_airy
 ###############################################################################
 E_F = 5.5  # Fermi energy (eV)
 a = 5.12  # sqrt(2m)/hbar with units of 1/(nm*sqrt(eV)) -- differs from Gundlach's by a factor of 2
+F_SWITCH = 0.2  # WKB/Airy transition field (eV/nm)
+F_BLEND = 0.05  # half-width of the smooth transition interval (eV/nm)
 ###############################################################################
 # Utilities
 ###############################################################################
@@ -152,7 +154,7 @@ def airy_all(z, z_switch=8.0):
 ###############################################################################
 
 def transmission(E, V, d, phi_t, phi_s,
-                 F1=0.2, z_switch=8.0, fudge=3.69):
+                 F1=F_SWITCH, z_switch=8.0, fudge=3.69, F_blend=F_BLEND):
     """
     Transmission probability through a trapezoidal vacuum barrier.
 
@@ -192,11 +194,16 @@ def transmission(E, V, d, phi_t, phi_s,
     Ws_minus_V = phi2 + E_F - E - V_eff
     F_s        = (V_eff + phi1 - phi2) / d
 
-    # 4) allocate output
+    # 4) evaluate both approximations in a narrow overlap around F1
     T = np.zeros_like(E, dtype=np.float64)
+    T_wkb = np.zeros_like(E, dtype=np.float64)
+    T_air = np.zeros_like(E, dtype=np.float64)
+    abs_F = np.abs(F_s)
+    wkb_valid = (W0 > 0) & (Ws_minus_V > 0)
+    blend_width = min(max(float(F_blend), 0.0), max(float(F1), 0.0))
 
     # ---------------------- WKB region  |F| ≤ F1 ------------------------------
-    m_wkb = (np.abs(F_s) <= F1) & (W0 > 0) & (Ws_minus_V > 0)
+    m_wkb = wkb_valid & (abs_F <= F1 + blend_width)
     if np.any(m_wkb):
         F_wkb = F_s[m_wkb]
         W0w   = W0[m_wkb]
@@ -219,10 +226,11 @@ def transmission(E, V, d, phi_t, phi_s,
         if np.any(mask_wkb):
             logT[mask_wkb] = -(4 * a) / (3 * F_wkb[mask_wkb]) * delta[mask_wkb]
 
-        T[m_wkb] = fudge * np.exp(logT)
+        T_wkb[m_wkb] = fudge * np.exp(logT)
 
     # ------------------------- Airy region  |F| > F1 --------------------------
-    m_air = ~m_wkb
+    m_air = (~wkb_valid) | (abs_F >= F1 - blend_width)
+    m_air &= abs_F > 0
     if np.any(m_air):
         F_air = F_s[m_air]
         factor = (a / np.abs(F_air))**(2/3)
@@ -247,7 +255,27 @@ def transmission(E, V, d, phi_t, phi_s,
         denom = ((zp/k1)*t1 + (k3/zp)*t2)**2 + ((k3/k1)*t3 + t4)**2
         denom = np.where(np.abs(denom) < 1e-12, np.inf, denom)
 
-        T[m_air] = num / denom
+        T_air[m_air] = num / denom
+
+    if blend_width == 0:
+        T[m_wkb] = T_wkb[m_wkb]
+        T[m_air] = T_air[m_air]
+    else:
+        m_wkb_only = wkb_valid & (abs_F <= F1 - blend_width)
+        m_air_only = (~wkb_valid) | (abs_F >= F1 + blend_width)
+        m_blend = wkb_valid & ~m_wkb_only & ~m_air_only
+        T[m_wkb_only] = T_wkb[m_wkb_only]
+        T[m_air_only] = T_air[m_air_only]
+        if np.any(m_blend):
+            fraction = (
+                (abs_F[m_blend] - (F1 - blend_width))
+                / (2 * blend_width)
+            )
+            weight = fraction**2 * (3 - 2 * fraction)
+            tiny = np.finfo(np.float64).tiny
+            log_wkb = np.log(np.maximum(T_wkb[m_blend], tiny))
+            log_air = np.log(np.maximum(T_air[m_blend], tiny))
+            T[m_blend] = np.exp((1 - weight) * log_wkb + weight * log_air)
 
     return np.clip(T, 0.0, 1.0)
 
@@ -302,14 +330,16 @@ def calibrate_fudge(phi_t, phi_s, F1,
                           phi_t, phi_s,
                           F1=F1,
                           z_switch=z_switch,
-                          fudge=1.0)
+                          fudge=1.0,
+                          F_blend=0.0)
 
     #    b) Airy‐only (fudge=1, cutoff=0 → forces Airy everywhere)
     T_airy = transmission(E_grid, V_grid, D_grid,
                           phi_t, phi_s,
                           F1=0.0,
                           z_switch=z_switch,
-                          fudge=1.0)
+                          fudge=1.0,
+                          F_blend=0.0)
 
     # 5) build mask for energies where WKB would have applied
     W0  = phi_t + E_grid - 0*V_grid  - E_grid + E_F  # compute properly:
@@ -470,13 +500,10 @@ def current(D_E, Eg, Vdc):
     domain = (Eg >= 0.0) & (Eg <= E_F)
     energy = Eg[domain]
     transmission_values = D_E[domain]
-    mask = energy < (E_F - bias)
-    p1 = np.trapezoid(bias * transmission_values[mask], energy[mask]) if mask.any() else 0.0
-    p2 = np.trapezoid(
-        (E_F - energy[~mask]) * transmission_values[~mask],
-        energy[~mask],
-    ) if (~mask).any() else 0.0
-    return bias_sign * (p1 + p2)
+    occupation_weight = np.minimum(bias, E_F - energy)
+    return bias_sign * np.trapezoid(
+        occupation_weight * transmission_values, energy,
+    )
 
 
 def current_batch(D_E, Eg, Vdc):
@@ -504,24 +531,9 @@ def current_batch(D_E, Eg, Vdc):
         Eg = Eg[domain]
 
     bias = np.abs(Vdc)
-    below = Eg[None, ...] < (E_F - bias[..., None])
-    lower_intervals = below[..., :-1] & below[..., 1:]
-    upper_intervals = ~below[..., :-1] & ~below[..., 1:]
-    delta_E = np.diff(Eg)
-
-    lower_values = bias[..., None] * D_E
-    upper_values = (E_F - Eg) * D_E
-    lower_integral = np.sum(
-        0.5 * (lower_values[..., :-1] + lower_values[..., 1:])
-        * delta_E * lower_intervals,
-        axis=-1,
-    )
-    upper_integral = np.sum(
-        0.5 * (upper_values[..., :-1] + upper_values[..., 1:])
-        * delta_E * upper_intervals,
-        axis=-1,
-    )
-    return np.sign(Vdc) * (lower_integral + upper_integral)
+    occupation_weight = np.minimum(bias[..., None], E_F - Eg)
+    integral = np.trapezoid(occupation_weight * D_E, Eg, axis=-1)
+    return np.sign(Vdc) * integral
 
 
 def direct_rf_current_grid(Eg, Vg, Ag, z, phi_tip, phi_samp,
@@ -592,7 +604,7 @@ def simulate(a):
 
     fudge=3.69
     fudge, samples = calibrate_fudge(
-        phi_t=a.phi_tip, phi_s=a.phi_samp, F1=0.2,
+        phi_t=a.phi_tip, phi_s=a.phi_samp, F1=F_SWITCH,
         D_min=a.z_min, D_max=a.z_max, n_D=100, n_E=200
     )
     print(f'(fudge, samples) = ({fudge}, {samples})')
@@ -606,6 +618,8 @@ def simulate(a):
                 if not np.allclose(file['z'][...], zg): return False
                 if abs(file.attrs['phi_tip'] - phi_tip) > 1e-8: return False
                 if abs(file.attrs['phi_samp'] - phi_samp) > 1e-8: return False
+                if abs(file.attrs['F_switch'] - F_SWITCH) > 1e-8: return False
+                if abs(file.attrs['F_blend'] - F_BLEND) > 1e-8: return False
                 return True
             except Exception:
                 return False
@@ -648,6 +662,8 @@ def simulate(a):
                 f.create_dataset('z', data=z_lut)
                 f.attrs['phi_tip'] = a.phi_tip
                 f.attrs['phi_samp'] = a.phi_samp
+                f.attrs['F_switch'] = F_SWITCH
+                f.attrs['F_blend'] = F_BLEND
         interp = interp_lut(lut, E_lut, V_lut, z_lut)
 
         I = np.zeros((len(zg), len(Vg), len(Ag)))
@@ -705,6 +721,8 @@ def simulate(a):
         f.attrs['use_lut'] = getattr(a, 'use_lut', False)
         f.attrs['fudge_factor'] = fudge
         f.attrs['E_F'] = E_F
+        f.attrs['F_switch'] = F_SWITCH
+        f.attrs['F_blend'] = F_BLEND
         f.attrs['current_units'] = 'normalized'
         f.attrs['current_prefactor'] = 1.0
         

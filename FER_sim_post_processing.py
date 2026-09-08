@@ -125,26 +125,27 @@ def invert_current_for_constant_I_4D_vectorized(I_target, D_vals, M):
     dIdVt = np.full((nV,nA), np.nan)
     for j in range(nV):
         for k in range(nA):
-            I_vs_D    = M[:,j,k,0]
+            I_vs_D = M[:,j,k,0]
             dIdV_vs_D = M[:,j,k,1]
-            D_axis    = D_vals
 
             # Ensure a strictly monotonic current curve before inversion.
             if I_vs_D[0] > I_vs_D[-1]:
-                I_vs_D    = I_vs_D[::-1]
-                dIdV_vs_D = dIdV_vs_D[::-1]
-                D_axis    = D_axis[::-1]
-            if np.any(np.diff(I_vs_D) <= 0):
+                current_axis = I_vs_D[::-1]
+                height_axis = D_vals[::-1]
+            else:
+                current_axis = I_vs_D
+                height_axis = D_vals
+            if np.any(np.diff(current_axis) <= 0):
                 continue
-            if not I_vs_D[0] <= I_target <= I_vs_D[-1]:
+            if not current_axis[0] <= I_target <= current_axis[-1]:
                 continue
 
             # invert current to find D
-            Di = np.interp(I_target, I_vs_D, D_axis)
+            Di = np.interp(I_target, current_axis, height_axis)
             Dt[j,k] = Di
 
-            # interpolate dI/dV at that D
-            dIdVt[j,k] = np.interp(Di, D_axis, dIdV_vs_D)
+            # D_vals remains increasing even when current decreases with height.
+            dIdVt[j,k] = np.interp(Di, D_vals, dIdV_vs_D)
     return Dt, dIdVt
 
 

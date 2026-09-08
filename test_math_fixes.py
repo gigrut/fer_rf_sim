@@ -31,6 +31,8 @@ from FER_sim_post_processing import (
     upsample_current_array,
 )
 from peak_analysis_service import detect_peaks
+import fer_sim_config
+from real_data_service import LEGACY_RF_AMPLITUDES, RealDataRepository
 
 
 def test_run_workflow_accepts_parameterized_sim_output(tmp_path, monkeypatch):
@@ -147,6 +149,36 @@ def test_post_processing_constant_current_rejects_extrapolation():
     assert np.all(np.isnan(result))
 
 
+def test_constant_current_slice_varies_height_and_reaches_target():
+    """Constant-current dI/dV must be evaluated at the inverted height."""
+    heights = np.array([1.0, 2.0, 3.0, 4.0])
+    voltage = np.array([0.0, 1.0, 2.0])
+    amplitudes = np.array([0.0, 1.0])
+    current_cube = np.empty((heights.size, voltage.size, amplitudes.size))
+    for height_index, height in enumerate(heights):
+        current_cube[height_index] = height * (voltage[:, None] + 1.0)
+    data = build_current_array(current_cube, voltage)
+    result = constant_current_slice(4.0, heights, data)
+    heights_at_target = result[..., 0]
+    expected_heights = np.array([4.0, 2.0, 4.0 / 3.0])
+    assert np.allclose(heights_at_target[:, 0], expected_heights)
+    assert np.unique(heights_at_target).size > 1
+    assert np.allclose(result[..., 1], expected_heights[:, None])
+
+
+def test_constant_current_derivative_interpolates_on_increasing_height_axis():
+    """Decreasing current with height must not flatten interpolated dI/dV."""
+    heights = np.array([1.0, 2.0, 3.0, 4.0])
+    current = np.array([8.0, 4.0, 2.0, 1.0])[:, None, None]
+    derivative = np.array([80.0, 40.0, 20.0, 10.0])[:, None, None]
+    data = np.stack((current, derivative), axis=-1)
+
+    result = constant_current_slice(3.0, heights, data)
+
+    assert result[0, 0, 0] == pytest.approx(2.5)
+    assert result[0, 0, 1] == pytest.approx(30.0)
+
+
 def test_post_processing_upsampling_validates_factors():
     current_array = np.zeros((2, 2, 1, 2))
     with pytest.raises(ValueError, match="positive integers"):
@@ -171,6 +203,33 @@ def test_peak_analysis_validates_polarity_and_axis():
         detect_peaks(x[[0, 2, 1]], np.array([0.0, 1.0, 0.0]))
     with pytest.raises(ValueError, match="polarity"):
         detect_peaks(x, np.array([0.0, 1.0, 0.0]), polarity="both")
+
+
+def test_real_data_config_has_repository_default_and_metadata():
+    assert fer_sim_config.REAL_DATA_CSV_PATH.endswith(
+        "z_dependent_fer_shift_csv"
+    )
+    assert fer_sim_config.REAL_DATA_SETPOINT == 1000
+    assert fer_sim_config.REAL_DATA_PEAK_NUMBER == 1
+
+
+def test_real_data_repository_loads_z_dependent_csvs(tmp_path):
+    first = tmp_path / "first.csv"
+    first.write_text(
+        "bias (mV),lockin-x (mV),curr (nA)\n"
+        "0,1,0.1\n100,2,0.2\n",
+        encoding="utf-8",
+    )
+    second = tmp_path / "second.csv"
+    second.write_text(
+        "bias (mV),lockin-x (mV),curr (nA)\n"
+        "0,3,0.3\n100,4,0.4\n",
+        encoding="utf-8",
+    )
+    spectra = RealDataRepository().load(tmp_path)
+    assert len(spectra) == 2
+    assert spectra[0].rf_amplitude == LEGACY_RF_AMPLITUDES[0]
+    assert spectra[1].data["lockin-x (mV)"].tolist() == [3, 4]
 
 def test_cardano_solver():
     """Test the Cardano solver with edge cases."""
@@ -279,6 +338,15 @@ def test_transmission():
 
     with pytest.raises(ValueError, match="must be positive"):
         transmission(1.0, 1.0, 0.0, phi_t, phi_s)
+
+    # The WKB/Airy regime transition must not introduce a finite jump.
+    unequal_phi_s = 5.0
+    distance = 1.0
+    for boundary in (0.8, 1.2):
+        left = transmission(E, boundary - 1e-7, distance, phi_t, unequal_phi_s)
+        right = transmission(E, boundary + 1e-7, distance, phi_t, unequal_phi_s)
+        scale = np.maximum(np.maximum(np.abs(left), np.abs(right)), 1e-300)
+        assert np.max(np.abs(right - left) / scale) < 1e-3
     
     print("✓ Transmission tests passed")
 
@@ -317,6 +385,13 @@ def test_current_calculation():
     assert current(D_extended, Eg_extended, 1.0) == pytest.approx(
         current(np.ones(3), Eg_extended[:3], 1.0)
     )
+
+    # Moving the occupation cutoff through an energy-grid point stays continuous.
+    dense_energy = np.linspace(0.0, 5.5, 100)
+    cutoff_voltage = 5.5 - dense_energy[80]
+    left = current(np.ones_like(dense_energy), dense_energy, cutoff_voltage - 1e-7)
+    right = current(np.ones_like(dense_energy), dense_energy, cutoff_voltage + 1e-7)
+    assert abs(right - left) < 1e-5
     
     print("✓ Current calculation tests passed")
 
