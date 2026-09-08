@@ -4,7 +4,11 @@ Test script to verify mathematical fixes in FER_constant_current_simulation.py
 """
 
 import numpy as np
+import pytest
 import warnings
+import subprocess
+from pathlib import Path
+
 from FER_constant_current_simulation import (
     _cardano_two_smallest, 
     image_potential, 
@@ -13,6 +17,44 @@ from FER_constant_current_simulation import (
     calibrate_fudge,
     current
 )
+
+import run_workflow
+
+
+def test_run_workflow_accepts_parameterized_sim_output(tmp_path, monkeypatch):
+    """Workflow should detect the newest current_phit*.h5 result."""
+    output_dir = tmp_path / "fer_output"
+    output_dir.mkdir()
+    output_file = output_dir / "current_phit_42.h5"
+    output_file.touch()
+
+    monkeypatch.chdir(tmp_path)
+    calls = []
+
+    def fake_run(cmd, check=False):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert run_workflow.run_quick_check() is True
+    assert calls == [["python", "quick_check.py"]]
+
+
+def test_run_workflow_requires_no_legacy_current_file(tmp_path, monkeypatch):
+    """Workflow should not fail solely because fer_output/current.h5 is missing."""
+    output_dir = tmp_path / "fer_output"
+    output_dir.mkdir()
+    (output_dir / "current_phit_99.h5").touch()
+
+    monkeypatch.chdir(tmp_path)
+
+    def fake_run(cmd, check=False):
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert run_workflow.run_constant_current_analysis(1e-9) is True
 
 def test_cardano_solver():
     """Test the Cardano solver with edge cases."""
@@ -28,11 +70,15 @@ def test_cardano_solver():
     print(f"Normal case roots: {roots}")
     assert np.all(np.isfinite(roots)), "Roots should be finite"
     
-    # Test with zero coefficient a (should be handled gracefully)
-    a_zero = np.array([0.0, 1.0, 1.0])
-    roots_zero = _cardano_two_smallest(a_zero, b, c, d)
-    print(f"Zero a coefficient roots: {roots_zero}")
-    assert np.all(np.isfinite(roots_zero)), "Roots should be finite even with zero a"
+    # A zero cubic coefficient should fall back to the quadratic equation.
+    roots_quadratic = _cardano_two_smallest(
+        np.array([0.0]),
+        np.array([1.0]),
+        np.array([-3.0]),
+        np.array([2.0]),
+    )
+    print(f"Quadratic roots: {roots_quadratic}")
+    assert np.allclose(roots_quadratic, [[1.0, 2.0]])
     
     print("✓ Cardano solver tests passed")
 
@@ -42,7 +88,7 @@ def test_image_potential():
     
     # Test with normal parameters
     D = 1.0
-    V = np.array([0.1, 1.0, 5.0])
+    V = np.array([0.0, 0.1, 1.0])
     phi_t = 4.0
     
     phi_im = image_potential(D, V, phi_t)
@@ -90,26 +136,33 @@ def test_transmission():
     print("Testing transmission...")
     
     # Test with normal parameters
-    E = np.array([0.1, 1.0, 2.0])
-    V = np.array([0.5, 1.0])
+    E = np.array([0.1, 1.0, 2.0])[:, None]
+    V = np.array([0.5, 1.0])[None, :]
     d = 1.0
     phi_t = 4.0
     phi_s = 4.0
     
     T = transmission(E, V, d, phi_t, phi_s)
     print(f"Normal case transmission shape: {T.shape}")
+    assert T.shape == (3, 2)
     assert np.all(np.isfinite(T)), "Transmission should be finite"
-    assert np.all(T >= 0), "Transmission should be non-negative"
+    assert np.all((T >= 0) & (T <= 1)), "Transmission must be a probability"
     
     # Test with zero field (should use WKB)
     T_wkb = transmission(E, 0.0, d, phi_t, phi_s)
     print(f"Zero field transmission: {T_wkb}")
     assert np.all(np.isfinite(T_wkb)), "WKB transmission should be finite"
+    expected_wkb = 3.69 * np.exp(-2 * 5.12 * d * np.sqrt(phi_t + 5.5 - E))
+    assert np.allclose(T_wkb, expected_wkb)
     
     # Test with very small barrier thickness
     T_thin = transmission(E, V, 0.1, phi_t, phi_s)
     print(f"Thin barrier transmission shape: {T_thin.shape}")
     assert np.all(np.isfinite(T_thin)), "Thin barrier transmission should be finite"
+    assert np.all(T_thin >= T), "A thinner barrier should not reduce transmission"
+
+    with pytest.raises(ValueError, match="must be positive"):
+        transmission(1.0, 1.0, 0.0, phi_t, phi_s)
     
     print("✓ Transmission tests passed")
 
@@ -132,12 +185,11 @@ def test_current_calculation():
     print(f"Zero transmission current: {I_zero}")
     assert I_zero == 0.0, "Zero transmission should give zero current"
     
-    # Test with NaN values (should be handled)
+    # Non-finite transmission must be rejected instead of silently integrated.
     D_E_nan = D_E.copy()
     D_E_nan[2] = np.nan
-    I_nan = current(D_E_nan, Eg, Vdc)
-    print(f"NaN transmission current: {I_nan}")
-    assert np.isfinite(I_nan), "Current should be finite even with NaN inputs"
+    with pytest.raises(ValueError, match="finite"):
+        current(D_E_nan, Eg, Vdc)
     
     print("✓ Current calculation tests passed")
 
@@ -145,39 +197,32 @@ def test_fudge_calibration():
     """Test fudge factor calibration with edge cases."""
     print("Testing fudge calibration...")
     
-    # Test with normal parameters
-    try:
-        fudge, samples = calibrate_fudge(
-            phi_t=4.0, phi_s=4.0, F1=0.2,
-            D_min=1.0, D_max=10.0, n_D=10, n_E=50
-        )
-        print(f"Normal case fudge: {fudge}, samples: {samples}")
-        assert np.isfinite(fudge), "Fudge factor should be finite"
-        assert fudge > 0, "Fudge factor should be positive"
-    except Exception as e:
-        print(f"Fudge calibration failed (expected for some parameter sets): {e}")
+    fudge, samples = calibrate_fudge(
+        phi_t=4.0, phi_s=4.0, F1=0.2,
+        D_min=0.3, D_max=5.0, n_D=10, n_E=50
+    )
+    print(f"Normal case fudge: {fudge}, samples: {samples}")
+    assert np.isfinite(fudge), "Fudge factor should be finite"
+    assert fudge > 0, "Fudge factor should be positive"
+    assert samples.size > 0
+
+    with pytest.raises(ValueError, match="0 < D_min < D_max"):
+        calibrate_fudge(4.0, 4.0, 0.2, D_min=0.0, D_max=5.0)
     
     print("✓ Fudge calibration tests passed")
 
 def test_edge_cases():
     """Test various edge cases that could cause problems."""
     print("Testing edge cases...")
-    
-    # Test with very small values
-    try:
-        T_small = transmission(1e-12, 1e-12, 1e-12, 1e-12, 1e-12)
-        print(f"Very small parameters transmission: {T_small}")
-        assert np.all(np.isfinite(T_small)), "Should handle very small parameters"
-    except Exception as e:
-        print(f"Very small parameters failed (may be expected): {e}")
-    
-    # Test with very large values
-    try:
-        T_large = transmission(100.0, 100.0, 100.0, 100.0, 100.0)
-        print(f"Very large parameters transmission: {T_large}")
-        assert np.all(np.isfinite(T_large)), "Should handle very large parameters"
-    except Exception as e:
-        print(f"Very large parameters failed (may be expected): {e}")
+
+    T_small = transmission(1e-12, 1e-12, 1e-12, 1e-12, 1e-12)
+    print(f"Very small parameters transmission: {T_small}")
+    assert np.all(np.isfinite(T_small)), "Should handle very small positive parameters"
+
+    T_large = transmission(100.0, 100.0, 100.0, 100.0, 100.0)
+    print(f"Very large parameters transmission: {T_large}")
+    assert np.all(np.isfinite(T_large)), "Should handle very large parameters"
+    assert np.all((T_large >= 0) & (T_large <= 1))
     
     print("✓ Edge case tests passed")
 

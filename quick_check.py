@@ -10,21 +10,14 @@ import plotly.graph_objects as go
 import plotly.express as px
 from pathlib import Path
 import argparse
-import glob
-
-def find_latest_simulation_file(directory=r"C:\Users\willh\OneDrive\Desktop\FER_Simulation\fer_output", pattern="current_phit*.h5"):
-    files = glob.glob(str(Path(directory) / pattern))
-    if not files:
-        raise FileNotFoundError(f"No simulation files matching {pattern} found in {directory}")
-    latest_file = max(files, key=lambda x: Path(x).stat().st_mtime)
-    print(f"[INFO] Using simulation file: {latest_file}")
-    return latest_file
+from h5_utilities import find_latest_simulation_file
 
 
 def load_simulation_data(h5_path=None):
     """Load simulation data from HDF5 file."""
     if h5_path is None:
         h5_path = find_latest_simulation_file()
+        print(f"[INFO] Using simulation file: {h5_path}")
     if not Path(h5_path).exists():
         raise FileNotFoundError(f"Simulation file not found: {h5_path}")
     

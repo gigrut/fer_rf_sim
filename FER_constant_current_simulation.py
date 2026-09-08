@@ -24,59 +24,31 @@ a = 5.12  # sqrt(2m)/hbar with units of 1/(nm*sqrt(eV)) -- differs from Gundlach
 # Need to worry about local argument a having the same name as global parameter a
 def _cardano_two_smallest(a, b, c, d, tol=1e-9):
     """
-    Solve a x^3 + b x^2 + c x + d = 0 for arrays a,b,c,d of the same shape.
+    Solve a x^3 + b x^2 + c x + d = 0 for broadcast-compatible coefficients.
     Returns two real roots per equation: the two smallest (by value) of all real solutions.
     """
-    # Normalize to x^3 + B x^2 + C x + D = 0
-    B = b / a
-    C = c / a
-    D = d / a
+    coefficient_arrays = np.broadcast_arrays(
+        np.asarray(a, dtype=np.float64),
+        np.asarray(b, dtype=np.float64),
+        np.asarray(c, dtype=np.float64),
+        np.asarray(d, dtype=np.float64),
+    )
+    coefficient_rows = np.stack([values.ravel() for values in coefficient_arrays], axis=1)
+    result = np.full((coefficient_rows.shape[0], 2), np.nan, dtype=np.float64)
+    root_tolerance = max(tol, np.sqrt(np.finfo(np.float64).eps))
 
-    # Depressed cubic substitute x = y - B/3
-    p = C - B*B/3
-    q = 2*B**3/27 - B*C/3 + D
+    for index, coefficients in enumerate(coefficient_rows):
+        scale = np.max(np.abs(coefficients))
+        if not np.isfinite(scale) or scale == 0:
+            continue
 
-    # Discriminant
-    Δ = (q/2)**2 + (p/3)**3
+        nonzero = np.flatnonzero(np.abs(coefficients) > tol * scale)
+        roots = np.roots(coefficients[nonzero[0]:])
+        real_roots = np.sort(roots.real[np.abs(roots.imag) <= root_tolerance])
+        count = min(2, real_roots.size)
+        result[index, :count] = real_roots[:count]
 
-    # Prepare output
-    n = a.size
-    roots = np.empty((n, 3), dtype=np.complex128)
-
-    # Case A: Δ >= 0 → one real, two complex
-    mA = Δ >= 0
-    if np.any(mA):
-        sqrtΔ = np.sqrt(Δ[mA])
-        u = np.cbrt(-q[mA]/2 + sqrtΔ)
-        v = np.cbrt(-q[mA]/2 - sqrtΔ)
-        y1 = u + v
-        roots[mA, 0] = y1
-        # the other two are complex conjugates:
-        roots[mA, 1] = -y1/2 + 0.5j*np.sqrt(3)*(u - v)
-        roots[mA, 2] = -y1/2 - 0.5j*np.sqrt(3)*(u - v)
-
-    # Case B: Δ < 0 → three real roots
-    mB = ~mA
-    if np.any(mB):
-        r = np.sqrt(-(p[mB]/3)**3)
-        θ = np.arccos(-q[mB]/(2*r))
-        m = np.cbrt(r)
-        roots[mB, 0] = 2*m*np.cos(θ/3)
-        roots[mB, 1] = 2*m*np.cos((θ+2*np.pi)/3)
-        roots[mB, 2] = 2*m*np.cos((θ+4*np.pi)/3)
-
-    # Shift back x = y - B/3
-    roots = roots - B[:,None]/3
-
-    # For each equation, pick the two smallest *real* roots
-    real_roots = []
-    for sol in roots:
-        reals = np.sort(sol.real[np.abs(sol.imag) < tol])
-        # if fewer than two real, pad with NaN
-        if reals.size < 2:
-            reals = np.pad(reals, (0,2-reals.size), constant_values=np.nan)
-        real_roots.append(reals[:2])
-    return np.array(real_roots)  # shape (n,2)
+    return result
 
 def image_potential(D, V, phi_t, rel_perm=1.0):
     """
@@ -141,9 +113,6 @@ def airy_all(z, z_switch=8.0):
         zp = z[mask_pos]
         t  = (2.0/3.0) * zp**1.5
 
-        # clamp t so exp(t) never overflows
-        t_clip = np.minimum(t, np.log(np.finfo(np.float64).max))  # ≈ 709
-        exp_pos = np.exp(t_clip)
         exp_neg = np.exp(-t)  # this never overflows
 
         preA   = 1.0/(2.0*np.sqrt(np.pi)*zp**0.25)
@@ -158,8 +127,9 @@ def airy_all(z, z_switch=8.0):
 
         out[0][mask_pos] = preA  * exp_neg * corrA
         out[1][mask_pos] = preAp * exp_neg * corrAp
-        out[2][mask_pos] = preB  * exp_pos * corrB
-        out[3][mask_pos] = preBp * exp_pos * corrBp
+        log_cap = np.log(np.finfo(np.float64).max) - 1.0
+        out[2][mask_pos] = np.exp(np.minimum(t + np.log(preB * corrB), log_cap))
+        out[3][mask_pos] = np.exp(np.minimum(t + np.log(preBp * corrBp), log_cap))
 
     # region 3: large negative z
     mask_neg = z < -z_switch
@@ -204,9 +174,11 @@ def transmission(E, V, d, phi_t, phi_s,
     # -------------------------------------------------------------------------
 
     # 1) broadcast all inputs to common shape
-    E = _to_arr(E)
-    V = _to_arr(V)
-    d = _to_arr(d)
+    E, V, d = np.broadcast_arrays(_to_arr(E), _to_arr(V), _to_arr(d))
+    if not (np.all(np.isfinite(E)) and np.all(np.isfinite(V)) and np.all(np.isfinite(d))):
+        raise ValueError("E, V, and d must contain only finite values")
+    if np.any(d <= 0):
+        raise ValueError("Barrier thickness d must be positive")
 
     # 2) relabel electrodes so V_eff ≥ 0
     swap   = V < 0
@@ -240,9 +212,7 @@ def transmission(E, V, d, phi_t, phi_s,
         mask_rect = np.abs(F_wkb) < 1e-10
         if np.any(mask_rect):
             d_rect = d_wkb if _is_scalar(d_wkb) else d_wkb[mask_rect]
-            logT[mask_rect] = -2 * a * d_rect * (
-                np.sqrt(W0w[mask_rect]) - np.sqrt(Wsw[mask_rect])
-            )
+            logT[mask_rect] = -2 * a * d_rect * np.sqrt(W0w[mask_rect])
 
         # (b) genuine WKB
         mask_wkb = ~mask_rect
@@ -279,7 +249,7 @@ def transmission(E, V, d, phi_t, phi_s,
 
         T[m_air] = num / denom
 
-    return T
+    return np.clip(T, 0.0, 1.0)
 
 
 
@@ -300,6 +270,9 @@ def calibrate_fudge(phi_t, phi_s, F1,
       The per-voltage fitted fudge factors.
     """
     print('Calibrating fudge factor')
+    if not 0 < D_min < D_max:
+        raise ValueError("Calibration distances must satisfy 0 < D_min < D_max")
+
     # 1) build sample voltages and corresponding Ds
     Ds = np.linspace(D_min, D_max, n_D)
     Vs = Ds * F1 - phi_t + phi_s
@@ -361,6 +334,8 @@ def calibrate_fudge(phi_t, phi_s, F1,
     # 7) average (but ignore elements equal to 1.0)
     x = f_i[good]
     samples = x[x != 1.0]
+    if samples.size == 0:
+        raise ValueError("Fudge calibration produced no valid samples")
     f_avg = float(np.mean(samples))
 
     return f_avg, samples
@@ -368,6 +343,15 @@ def calibrate_fudge(phi_t, phi_s, F1,
 ###############################################################################
 # LUT with progress
 ###############################################################################
+
+def _upscaled_axis(values, factor):
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 1 or values.size < 2:
+        raise ValueError("LUT axes must be one-dimensional with at least two points")
+    if not isinstance(factor, (int, np.integer)) or factor < 1:
+        raise ValueError("LUT upscale factors must be positive integers")
+    return np.linspace(values[0], values[-1], (values.size - 1) * factor + 1)
+
 
 def build_lut(Eg, Vg, zg, phi_t, phi_s, upscale=1, fudge=1):
     """
@@ -383,12 +367,10 @@ def build_lut(Eg, Vg, zg, phi_t, phi_s, upscale=1, fudge=1):
     upscale : int or tuple of ints
       Resolution multiplier for (z,V,E) axes. If int, applies to all.
 
-    Returns
-    -------
-    lut : ndarray, shape (Nz, Nv, Ne)
-      Transmission probability
-    z_lut, V_lut, E_lut : ndarray
-      The upscaled axis arrays
+        Returns
+        -------
+        lut : ndarray, shape (Nz, Nv, Ne)
+            Transmission probability on the optionally upscaled axes.
     """
     # parse upscale factors
     if isinstance(upscale, int):
@@ -397,9 +379,9 @@ def build_lut(Eg, Vg, zg, phi_t, phi_s, upscale=1, fudge=1):
         fz, fV, fE = upscale  # type: ignore
 
     # build high-res axes
-    z_lut = np.linspace(zg[0], zg[-1], (len(zg)-1)*fz + 1)
-    V_lut = np.linspace(Vg[0], Vg[-1], (len(Vg)-1)*fV + 1)
-    E_lut = np.linspace(Eg[0], Eg[-1], (len(Eg)-1)*fE + 1)
+    z_lut = _upscaled_axis(zg, fz)
+    V_lut = _upscaled_axis(Vg, fV)
+    E_lut = _upscaled_axis(Eg, fE)
 
     # prepare output
     lut = np.empty((len(z_lut), len(V_lut), len(E_lut)), dtype=np.float64)
@@ -474,6 +456,15 @@ def D_avg(interp, Eg, Vdc, Arf, z, nodes):
 
 
 def current(D_E, Eg, Vdc):
+    D_E = np.asarray(D_E, dtype=np.float64)
+    Eg = np.asarray(Eg, dtype=np.float64)
+    if D_E.ndim != 1 or Eg.ndim != 1 or D_E.shape != Eg.shape:
+        raise ValueError("D_E and Eg must be one-dimensional arrays with matching shapes")
+    if not (np.all(np.isfinite(D_E)) and np.all(np.isfinite(Eg)) and np.isfinite(Vdc)):
+        raise ValueError("D_E, Eg, and Vdc must contain only finite values")
+    if np.any(np.diff(Eg) <= 0):
+        raise ValueError("Eg must be strictly increasing")
+
     mask = Eg < (E_F - Vdc)
     p1 = np.trapezoid(Vdc*D_E[mask], Eg[mask]) if mask.any() else 0.0
     p2 = np.trapezoid((E_F - Eg[~mask])*D_E[~mask], Eg[~mask]) if (~mask).any() else 0.0
@@ -485,7 +476,7 @@ def current(D_E, Eg, Vdc):
 ###############################################################################
 
 def simulate(a):
-    Eg = np.linspace(0.01, E_F + a.e_extra, a.n_E)
+    Eg = np.linspace(a.E_min, a.E_max + a.e_extra, a.n_E)
     Vg = np.linspace(a.v_min, a.v_max, a.n_V)
     zg = np.linspace(a.z_min, a.z_max, a.n_Z)
     Ag = np.linspace(a.A_min, a.A_max, a.n_A)
@@ -498,7 +489,7 @@ def simulate(a):
     fudge=3.69
     fudge, samples = calibrate_fudge(
         phi_t=a.phi_tip, phi_s=a.phi_samp, F1=0.2,
-        D_min=a.v_min, D_max=a.v_max, n_D=100, n_E=200
+        D_min=a.z_min, D_max=a.z_max, n_D=100, n_E=200
     )
     print(f'(fudge, samples) = ({fudge}, {samples})')
 
@@ -520,20 +511,20 @@ def simulate(a):
         upscale_v = getattr(a, 'upscale_v', None) or a.upscale  
         upscale_e = getattr(a, 'upscale_e', None) or a.upscale
         upscale_factors = (upscale_z, upscale_v, upscale_e)
+        z_lut = _upscaled_axis(zg, upscale_z)
+        V_lut = _upscaled_axis(Vg_lut, upscale_v)
+        E_lut = _upscaled_axis(Eg, upscale_e)
         
         # Create parameter-based LUT filename
         upscale_str = f"_up{upscale_z}{upscale_v}{upscale_e}" if upscale_factors != (1,1,1) else ""
-        lut_filename = f"transmission_lut_phit{a.phi_tip:.1f}_phis{a.phi_samp:.1f}_nE{len(Eg)}_nV{len(Vg_lut)}_nZ{len(zg)}{upscale_str}.h5"
+        lut_filename = f"transmission_lut_phit{a.phi_tip:.1f}_phis{a.phi_samp:.1f}_nE{len(E_lut)}_nV{len(V_lut)}_nZ{len(z_lut)}{upscale_str}.h5"
         lut_file = out / lut_filename
         rebuild_lut = True
         if lut_file.exists() and not getattr(a, 'force_rebuild_lut', False):
             with h5py.File(lut_file, 'r') as f:
-                if grids_match(f, Eg, Vg_lut, zg, a.phi_tip, a.phi_samp):
+                if grids_match(f, E_lut, V_lut, z_lut, a.phi_tip, a.phi_samp):
                     print('[load] LUT')
                     lut = np.array(f['D'][...])
-                    Eg = np.array(f['E'][...])
-                    Vg_lut = np.array(f['V'][...])
-                    zg = np.array(f['z'][...])
                     rebuild_lut = False
                 else:
                     print('[rebuild] LUT: grid or parameters changed.')
@@ -545,12 +536,12 @@ def simulate(a):
             lut = build_lut(Eg, Vg_lut, zg, a.phi_tip, a.phi_samp, upscale=upscale_factors, fudge=fudge)
             with h5py.File(lut_file, 'w') as f:
                 f.create_dataset('D', data=lut, compression='gzip')
-                f.create_dataset('E', data=Eg)
-                f.create_dataset('V', data=Vg_lut)
-                f.create_dataset('z', data=zg)
+                f.create_dataset('E', data=E_lut)
+                f.create_dataset('V', data=V_lut)
+                f.create_dataset('z', data=z_lut)
                 f.attrs['phi_tip'] = a.phi_tip
                 f.attrs['phi_samp'] = a.phi_samp
-        interp = interp_lut(lut, Eg, Vg_lut, zg)
+        interp = interp_lut(lut, E_lut, V_lut, z_lut)
 
         I = np.zeros((len(zg), len(Vg), len(Ag)))
         def _row(i,z):
@@ -624,15 +615,20 @@ def _merge_yaml_into_args(yaml_path: str, parser: argparse.ArgumentParser,
         cfg = yaml.safe_load(f) or {}
 
     sim_cfg = cfg.get('simulation', cfg)        # tolerate no top-level key
+    destinations = {
+        action.dest.lower(): action.dest
+        for action in parser._actions
+        if action.dest != argparse.SUPPRESS
+    }
     for k, v in sim_cfg.items():
-        k_cli = k.lower()                       # YAML uses Z_min → z_min
-        if not hasattr(args, k_cli):
+        destination = destinations.get(k.lower())
+        if destination is None:
             continue                            # ignore unexpected keys
-        default_val = parser.get_default(k_cli)
-        current_val = getattr(args, k_cli)
+        default_val = parser.get_default(destination)
+        current_val = getattr(args, destination)
         # if the current value is still the default, replace it with YAML
         if current_val == default_val:
-            setattr(args, k_cli, v)
+            setattr(args, destination, v)
     return args
 
 # ─── 3. CLI: add --config flag and call the helper ───────────────────────────
@@ -646,6 +642,8 @@ def cli():
     p.add_argument('--n_V', type=int, default=100)
     p.add_argument('--n_Z', type=int, default=100)
     p.add_argument('--n_A', type=int, default=30)
+    p.add_argument('--E_min', type=np.float64, default=0.01)
+    p.add_argument('--E_max', type=np.float64, default=E_F)
     p.add_argument('--e_extra', type=np.float64, default=0.0)
     p.add_argument('--v_min', type=np.float64, default=0.0)
     p.add_argument('--v_max', type=np.float64, default=10.0)
@@ -663,8 +661,12 @@ def cli():
                    help='Force rebuild of LUT even if compatible one exists')
     p.add_argument('--list-luts', action='store_true',
                    help='List existing LUT files and exit')
-    p.add_argument('--use-lut', action='store_true', default=True,
-                   help='Use LUT for transmission (default: direct calculation)')
+    lut_mode = p.add_mutually_exclusive_group()
+    lut_mode.add_argument('--use-lut', dest='use_lut', action='store_true',
+                          help='Use the transmission LUT (default)')
+    lut_mode.add_argument('--no-lut', '--no-use-lut', dest='use_lut', action='store_false',
+                          help='Calculate transmission directly')
+    p.set_defaults(use_lut=True)
     p.add_argument('--upscale', type=int, default=1,
                    help='Upscale LUT resolution by this factor (default: 1)')
     p.add_argument('--upscale-z', type=int,
@@ -676,7 +678,11 @@ def cli():
 
     # ---- PARSE once, then merge YAML defaults -------------------------------
     args = p.parse_args()
-    args = _merge_yaml_into_args('fer_config.yaml', p, args)
+    config_path = Path(args.config) if args.config else Path('fer_config.yaml')
+    if config_path.exists():
+        args = _merge_yaml_into_args(str(config_path), p, args)
+    elif args.config:
+        p.error(f"config file not found: {config_path}")
 
     # ---- Act on --list-luts early -------------------------------------------
     if args.list_luts:
@@ -685,8 +691,9 @@ def cli():
 
     # ---- Launch simulation ---------------------------------------------------
     t0 = time.perf_counter()
-    simulate(args)
+    current_file = simulate(args)
     print(f"[done] total runtime {time.perf_counter()-t0:.1f} s")
+    return current_file
 
 
 if __name__ == '__main__':

@@ -9,6 +9,9 @@ import sys
 import os
 from pathlib import Path
 import argparse
+import numpy as np
+
+from h5_utilities import find_latest_simulation_file
 
 def run_simulation(use_lut=True, quick_test=False):
     """Run the main simulation."""
@@ -56,11 +59,13 @@ def run_quick_check():
     print("\n" + "=" * 60)
     print("STEP 2: Quick Validation")
     print("=" * 60)
-    
-    if not Path("fer_output/current.h5").exists():
+
+    try:
+        h5_path = find_latest_simulation_file("fer_output")
+    except FileNotFoundError:
         print("✗ Simulation output not found. Please run simulation first.")
         return False
-    
+
     print("Running quick analysis plots...")
     cmd = ["python", "quick_check.py"]
     
@@ -77,15 +82,17 @@ def run_constant_current_analysis(I_target=None):
     print("\n" + "=" * 60)
     print("STEP 3: Constant Current Analysis")
     print("=" * 60)
-    
-    if not Path("fer_output/current.h5").exists():
+
+    try:
+        h5_path = find_latest_simulation_file("fer_output")
+    except FileNotFoundError:
         print("✗ Simulation output not found. Please run simulation first.")
         return False
-    
+
     if I_target is None:
         # Try to estimate a reasonable current level from the data
         import h5py
-        with h5py.File("fer_output/current.h5", "r") as f:
+        with h5py.File(h5_path, "r") as f:
             I_cube = f["I"][...]
             I_target = np.median(I_cube[I_cube > 0])  # Median of positive currents
             print(f"Using estimated current level: I = {I_target:.2e}")

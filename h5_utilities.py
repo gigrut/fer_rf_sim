@@ -8,6 +8,23 @@ import h5py
 import numpy as np
 from pathlib import Path
 
+
+def find_latest_simulation_file(directory="fer_output", pattern="current_phit*.h5"):
+    """Return the newest parameterized simulation output, or the legacy file."""
+    output_directory = Path(directory)
+    parameterized_files = list(output_directory.glob(pattern))
+    if parameterized_files:
+        return max(parameterized_files, key=lambda path: path.stat().st_mtime)
+
+    legacy_file = output_directory / "current.h5"
+    if legacy_file.exists():
+        return legacy_file
+
+    raise FileNotFoundError(
+        f"No simulation files matching {pattern} or current.h5 found in {output_directory}"
+    )
+
+
 def explore_h5_file(file_path):
     """Explore the structure and contents of an HDF5 file."""
     print(f"Exploring: {file_path}")
