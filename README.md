@@ -40,6 +40,12 @@ Copy `FittedPeaksDF.csv` into `data/raw/` or set:
 set FER_REAL_DATA_CSV=C:\path\to\FittedPeaksDF.csv
 ```
 
+This repository currently does not include the real-data files, and `data/raw/`
+may need to be created locally. The GUI's **Real Data** tab accepts either a
+CSV file or a folder of CSV files. Some older analysis scripts still contain
+machine-specific `Downloads` or `Desktop` paths; those are legacy defaults and
+are not reliable locations for the current project.
+
 ## Undo / restore
 
 ```powershell
