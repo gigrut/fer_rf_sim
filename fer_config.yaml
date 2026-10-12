@@ -13,6 +13,8 @@ simulation:
   n_A: 30
   phi_tip: 4.0
   phi_samp: 4.0
+  E_F_tip: 5.5
+  E_F_samp: 5.5
   n_cheb: 32
   out: fer_output
 

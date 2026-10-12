@@ -28,6 +28,9 @@ class SimulationConfig:
     A_max: float = 5.0
     phi_tip: float = 4.0
     phi_samp: float = 5.0
+    # Fermi energies above each electrode's own band bottom (low temperature, free-electron bands).
+    E_F_tip: float = 5.5
+    E_F_samp: float = 5.5
     n_cheb: int = 32
     threads: int = -1
     out: str = "fer_output"
@@ -39,7 +42,8 @@ class SimulationConfig:
     dc_table_points: int = 129
     dc_table_max_points: int = 16385
     dc_table_rtol: float = 1e-3
-    dc_table_atol: float = 1e-15
+    # Tunneling current spans many decades; any fixed absolute floor skips refinement at large heights.
+    dc_table_atol: float = 0.0
     upscale: int = 1
     upscale_z: int | None = None
     upscale_v: int | None = None
@@ -61,7 +65,8 @@ class SimulationConfig:
                 raise ValueError(f"{name} must be at least {minimum}" +
                                  (" or -1" if name == "threads" else ""))
         for name in ("E_min", "E_max", "e_extra", "v_min", "v_max", "z_min", "z_max",
-                     "A_min", "A_max", "phi_tip", "phi_samp", "dc_table_rtol", "dc_table_atol"):
+                     "A_min", "A_max", "phi_tip", "phi_samp", "E_F_tip", "E_F_samp",
+                     "dc_table_rtol", "dc_table_atol"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
                 raise ValueError(f"{name} must be a finite number")
@@ -79,6 +84,10 @@ class SimulationConfig:
             raise ValueError("effective RF voltage range must be finite")
         if self.phi_tip <= 0 or self.phi_samp <= 0:
             raise ValueError("work functions must be positive")
+        for name in ("E_F_tip", "E_F_samp"):
+            if not self.E_min < getattr(self, name) <= effective_energy:
+                raise ValueError(f"{name} must exceed E_min and not exceed E_max + e_extra, "
+                                 "so the energy grid spans the occupied states")
         if self.dc_table_max_points < self.dc_table_points:
             raise ValueError("dc_table_max_points must be at least dc_table_points")
         if (self.dc_table_rtol < 0 or self.dc_table_atol < 0

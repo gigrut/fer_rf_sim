@@ -59,7 +59,7 @@ def test_direct_energy_filter_and_zero_rf_match_scalar_reference(monkeypatch, en
 
     monkeypatch.setattr("fer_rf_sim.simulation.transmission", counted_transmission)
     actual = direct_rf_current_grid(energy, voltages, amplitudes, 0.3,
-                                    4, 5, 1, nodes, amplitude_chunk=1)
+                                    4, 5, nodes, amplitude_chunk=1)
     expected = np.array([
         [rf_averaged_current(lambda bias: transmission(energy, bias, 0.3, 4, 5),
                              energy, voltage, amplitude, nodes)
@@ -145,6 +145,24 @@ def test_dc_table_service_metadata_and_current(tmp_path, use_lut, threads):
     np.testing.assert_allclose(accelerated.current, reference.current, rtol=0.002, atol=1e-15)
 
 
+def test_fermi_energy_reaches_simulation_and_artifact(tmp_path):
+    from dataclasses import replace
+    from fer_rf_sim.repository import load_simulation
+    from fer_rf_sim.service import SimulationConfig, SimulationRunner
+
+    config = SimulationConfig(n_E=16, n_V=5, n_Z=2, n_A=2, n_cheb=7, threads=1,
+                              v_min=0.1, v_max=0.4, A_max=0.05, z_max=0.5,
+                              phi_samp=4, out=str(tmp_path))
+    runner = SimulationRunner()
+    default = load_simulation(runner.run(config))
+    lowered = load_simulation(runner.run(replace(config, E_max=4.5, E_F_tip=4.5, E_F_samp=4.0)))
+    assert (default.metadata["E_F_tip"], default.metadata["E_F_samp"]) == (5.5, 5.5)
+    assert (lowered.metadata["E_F_tip"], lowered.metadata["E_F_samp"]) == (4.5, 4.0)
+    assert not np.allclose(lowered.current, default.current, rtol=0.01)
+    swapped = load_simulation(runner.run(replace(config, E_max=4.5, E_F_tip=4.0, E_F_samp=4.5)))
+    assert not np.allclose(swapped.current, lowered.current, rtol=0.01)
+
+
 def test_service_reports_z_progress_and_cancels_before_current_artifact(tmp_path):
     from threading import Event
     from fer_rf_sim.service import SimulationConfig, SimulationRunner
@@ -206,12 +224,35 @@ def test_dc_table_matches_physics_across_bias_and_contact_potential():
     def evaluate(energy, voltage):
         return transmission(energy, voltage, 0.7, 4, 5)
 
-    reference = direct_rf_current_grid(energy, voltage, amplitudes, 0.7, 4, 5, 1, nodes)
+    reference = direct_rf_current_grid(energy, voltage, amplitudes, 0.7, 4, 5, nodes)
     actual, diagnostics = dc_table_rf_current_grid(
         evaluate, energy, voltage, amplitudes, nodes, rtol=1e-4, max_points=12000,
     )
     assert diagnostics["max_scaled_error"] <= 1
     np.testing.assert_allclose(actual, reference, rtol=0.001, atol=1e-14)
+
+
+def test_default_dc_table_tolerances_hold_where_current_is_tiny():
+    from fer_rf_sim.config import SimulationConfig
+    from fer_rf_sim.physics import transmission
+    from fer_rf_sim.simulation import dc_table_rf_current_grid, direct_rf_current_grid
+
+    # At z=2.8 nm the current spans ~1e-27 to 1e-9, mostly below any fixed absolute tolerance.
+    defaults = SimulationConfig()
+    energy = np.linspace(0.01, 5.5, 60)
+    voltage = np.linspace(0.5, 10, 200)
+    amplitudes = np.array([0.0, 1.0])
+    nodes = cosine_nodes(16)
+
+    def evaluate(energy, voltage):
+        return transmission(energy, voltage, 2.8, 4, 5)
+
+    reference = direct_rf_current_grid(energy, voltage, amplitudes, 2.8, 4, 5, nodes)
+    actual, _ = dc_table_rf_current_grid(
+        evaluate, energy, voltage, amplitudes, nodes,
+        rtol=defaults.dc_table_rtol, atol=defaults.dc_table_atol, max_points=defaults.dc_table_max_points,
+    )
+    np.testing.assert_allclose(actual, reference, rtol=0.005, atol=0)
 
 
 def test_single_voltage_lut_keeps_general_fallback():

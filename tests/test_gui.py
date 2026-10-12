@@ -213,7 +213,8 @@ def test_config_layout_keeps_fields_accessible(application, tmp_path, size):
     application.processEvents()
     assert not window.advanced_settings.isHidden()
     assert {group.title() for group in scroll.findChildren(QGroupBox)} == {
-        "Methods", "Sampling", "Sweep ranges", "Work functions", "LUT", "DC-current table", "Execution",
+        "Methods", "Sampling", "Sweep ranges", "Work functions", "Fermi energies", "LUT",
+        "DC-current table", "Execution",
     }
     for name in window._initial_values:
         field = window.output if name == "out" else getattr(window, name)
@@ -289,6 +290,81 @@ def wait_for_thread(window):
     timer.start(5000)
     loop.exec()
     assert window.thread is None
+
+
+def test_constant_current_dzdv_views_match_peak_extraction(application, artifact):
+    from types import SimpleNamespace
+    from fer_rf_sim.peaks import simulated_peak_spectra
+
+    window = make_window()
+    figures = []
+    window.simulated_host = SimpleNamespace(update=figures.append, close=lambda: None)
+    try:
+        window.load_artifact(artifact)
+        target = float(window.constant_current_targets[window.simulated_current_slider.value()])
+        expected = simulated_peak_spectra(
+            window.simulated_data, mode="constant-current dZ/dV", current_target=target,
+        )[0].signal
+        window.simulated_view_type.setCurrentText("Constant-current dZ/dV trace")
+        assert figures[-1].layout.yaxis.title.text == "dZ/dV (nm/V)"
+        np.testing.assert_allclose(figures[-1].data[0].y, expected, equal_nan=True)
+        window.simulated_view_type.setCurrentText("Constant-current dZ/dV heatmap")
+        assert figures[-1].data[0].colorbar.title.text == "dZ/dV (nm/V)"
+        np.testing.assert_allclose(figures[-1].data[0].z[0], expected, equal_nan=True)
+    finally:
+        window.close()
+
+
+def test_heatmap_color_range_clip_and_manual(application, tmp_path):
+    from types import SimpleNamespace
+
+    # Spread the bulk of the values so the 5% clip yields a non-degenerate range.
+    current = np.linspace(1.0, 2.0, 100).reshape(10, 10, 1)
+    current[0, 0, 0] = 1e6
+    path = tmp_path / "outlier.h5"
+    with h5py.File(path, "w") as file:
+        for name, values in {"I": current, "z": np.arange(10.), "V": np.arange(10.), "A_rf": [0]}.items():
+            file[name] = values
+    window = make_window()
+    figures = []
+    window.simulated_host = SimpleNamespace(update=figures.append, close=lambda: None)
+    try:
+        window.simulated_view_type.setCurrentText("Current heatmap")
+        window.simulated_color_scale.setCurrentText("Linear")
+        window.load_artifact(path)
+        assert figures[-1].data[0].zmax is None
+        assert not window.simulated_color_min.isEnabled()
+        window.simulated_color_range.setCurrentText("Clip 5%")
+        clipped_max = figures[-1].data[0].zmax
+        assert clipped_max is not None and 1.0 < clipped_max < 2.5
+        window.simulated_color_range.setCurrentText("Manual")
+        assert window.simulated_color_max.isEnabled()
+        window.simulated_color_min.setText("0.5")
+        window.simulated_color_max.setText("2")
+        window.simulated_color_max.editingFinished.emit()
+        assert (figures[-1].data[0].zmin, figures[-1].data[0].zmax) == (0.5, 2.0)
+    finally:
+        window.close()
+
+
+def test_typed_slider_values_snap_to_grid(application, probability_artifact):
+    window = make_window()
+    try:
+        window.load_artifact(probability_artifact)
+        window.simulated_rf_value.setText("0.3 V")
+        window.simulated_rf_value.editingFinished.emit()
+        assert window.simulated_rf_slider.value() == 1
+        assert window.simulated_rf_value.text() == "0.4 V"
+        window.simulated_view_type.setCurrentText("Constant-current dI/dV trace")
+        window.simulated_current_value.setText("2e-9")
+        window.simulated_current_value.editingFinished.emit()
+        target = window.constant_current_targets[window.simulated_current_slider.value()]
+        assert target == pytest.approx(2e-9, rel=0.02)
+        window.simulated_current_value.setText("abc")
+        window.simulated_current_value.editingFinished.emit()
+        assert window.simulated_current_value.text() == f"{target:.3e} A"
+    finally:
+        window.close()
 
 
 def test_gui_derivatives_cached_and_setpoints_bounded(application, artifact, monkeypatch):
@@ -485,6 +561,8 @@ def test_advanced_simulation_controls_reach_worker(application, artifact, monkey
         window.dc_table_atol.setText("1.25e-18")
         window.threads.setValue(2)
         window.amplitude_chunk.setValue(3)
+        window.E_F_tip.setValue(5.0)
+        window.E_F_samp.setValue(4.5)
         window._run_simulation()
         wait_for_thread(window)
         actual = captured[0]
@@ -494,6 +572,7 @@ def test_advanced_simulation_controls_reach_worker(application, artifact, monkey
         assert actual.dc_table_rtol == 2.5e-4
         assert actual.dc_table_atol == 1.25e-18
         assert (actual.threads, actual.amplitude_chunk) == (2, 3)
+        assert (actual.E_F_tip, actual.E_F_samp) == (5.0, 4.5)
     finally:
         window.close()
 

@@ -42,7 +42,7 @@ def test_reference_has_unique_topics_and_only_local_links():
 
 def test_reference_constants_match_the_numerical_model():
     sections = {anchor: body for anchor, _, body in MATH_SECTIONS}
-    assert f"E<sub>F</sub> = {E_F:g} eV" in sections["notation"]
+    assert f"(5.5 eV each by default" in sections["notation"] and E_F == 5.5
     assert f"a = {a:g} nm" in sections["notation"]
     assert f"F<sub>1</sub> = {F_SWITCH:g} V/nm" in sections["hybrid"]
     assert f"b = {F_BLEND:g} V/nm" in sections["hybrid"]

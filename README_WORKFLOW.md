@@ -83,7 +83,7 @@ units, matching limitations, and replicate handling.
 
 Outputs remain under `fer_output/` unless overridden. Simulation names contain
 a configuration identity and a unique run ID, so repeated runs do not replace
-one another. Axes, units, effective config, model/schema/calibration versions,
+one another. Axes, units, effective config, model/schema versions,
 and exact LUT linkage are stored with the legacy `I`, `z`, `V`, `A_rf` datasets.
 Legacy range summaries are derived from axes when metadata is absent. See
 [LUT management](LUT_MANAGEMENT.md) for cache identity and safe cleanup.

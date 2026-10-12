@@ -8,14 +8,14 @@ RF voltage range. Energy/voltage/height upscaling creates matching data and axes
 ## Identity And Reuse
 
 New caches are named `transmission_lut_<sha256>.h5`. The identity covers exact
-axis values, unrounded work functions, calibrated WKB factor, Fermi energy,
-transition/blend settings, dtype, model/schema version and calibration recipe.
+axis values, unrounded work functions, tip and sample Fermi energies,
+transition/blend settings, dtype and model/schema version.
 The simulator, management utility and plot loaders share the compatibility
 implementation. Matching counts or rounded work functions alone are insufficient.
 
-Calibration explicitly evaluates WKB and Airy branches. The zero-blend boundary
-belongs to WKB; valid unit calibration ratios are retained. These changes are
-versioned so older numerical caches are not silently reused.
+Earlier caches also hashed a WKB calibration factor that the active model never
+used. Removing it changed the identity, so older caches are not reused and are
+rebuilt on first use.
 
 Both simulations and caches are written through temporary files followed by
 atomic publication. A simulation records the exact cache filename and identity.

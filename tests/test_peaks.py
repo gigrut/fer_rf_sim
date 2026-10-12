@@ -22,6 +22,15 @@ def test_batch_extraction_preserves_rf_and_peak_measurements():
         assert result.peaks.prominence[0] == pytest.approx(1)
 
 
+def test_peak_positions_are_not_quantized_to_the_voltage_grid():
+    voltage = np.linspace(0, 4, 81)
+    centers = 2 + np.linspace(0, 0.05, 11)
+    spectra = [PeakSpectrum(str(c), voltage, np.exp(-((voltage - c) / 0.2) ** 2), 0.) for c in centers]
+    positions = [result.peaks.position[0] for result in extract_spectra(spectra, prominence=0.1)]
+    np.testing.assert_allclose(positions, centers, atol=2e-3)
+    assert np.all(np.diff(positions) > 0)
+
+
 def test_extraction_does_not_bridge_invalid_regions():
     spectrum = PeakSpectrum("partial", np.arange(11.),
                             np.array([0, 2, 0, np.nan, 0, 3, 0, np.nan, 0, 4, 0]))

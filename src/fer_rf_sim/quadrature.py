@@ -38,7 +38,7 @@ def D_avg(interp, Eg, Vdc, Arf, z, cos_nodes):
     return vals.mean(axis=1)
 
 
-def current(D_E, Eg, Vdc):
+def current(D_E, Eg, Vdc, fermi_tip=E_F, fermi_samp=None):
     D_E = np.asarray(D_E, dtype=np.float64)
     Eg = np.asarray(Eg, dtype=np.float64)
     if D_E.ndim != 1 or Eg.ndim != 1 or D_E.shape != Eg.shape:
@@ -50,16 +50,18 @@ def current(D_E, Eg, Vdc):
 
     bias_sign = np.sign(Vdc)
     bias = abs(Vdc)
-    domain = (Eg >= 0.0) & (Eg <= E_F)
+    # The emitting electrode sets the occupied-energy limit: tip for V >= 0, sample for V < 0.
+    emitter_fermi = fermi_tip if fermi_samp is None or Vdc >= 0 else fermi_samp
+    domain = (Eg >= 0.0) & (Eg <= emitter_fermi)
     energy = Eg[domain]
     transmission_values = D_E[domain]
-    occupation_weight = np.minimum(bias, E_F - energy)
+    occupation_weight = np.minimum(bias, emitter_fermi - energy)
     return bias_sign * np.trapezoid(
         occupation_weight * transmission_values, energy,
     )
 
 
-def current_batch(D_E, Eg, Vdc):
+def current_batch(D_E, Eg, Vdc, fermi_tip=E_F, fermi_samp=None):
     """Evaluate ``current`` for a batch of transmission spectra.
 
     ``D_E`` has shape ``(..., n_E)`` and ``Vdc`` has the matching leading
@@ -78,18 +80,24 @@ def current_batch(D_E, Eg, Vdc):
     if np.any(np.diff(Eg) <= 0):
         raise ValueError("Eg must be strictly increasing")
 
-    domain = (Eg >= 0.0) & (Eg <= E_F)
+    domain = Eg >= 0.0
     if not np.all(domain):
         D_E = D_E[..., domain]
         Eg = Eg[domain]
 
+    fermi_samp = fermi_tip if fermi_samp is None else fermi_samp
+    # The emitting electrode sets the occupied-energy limit: tip for V >= 0, sample for V < 0.
+    emitter_fermi = np.where(Vdc < 0, fermi_samp, fermi_tip)[..., None]
     bias = np.abs(Vdc)
-    occupation_weight = np.minimum(bias[..., None], E_F - Eg)
-    integral = np.trapezoid(occupation_weight * D_E, Eg, axis=-1)
+    occupation_weight = np.minimum(bias[..., None], emitter_fermi - Eg)
+    weighted = occupation_weight * D_E
+    intervals = np.diff(Eg) * (weighted[..., 1:] + weighted[..., :-1]) / 2.0
+    integral = np.where(Eg[1:] <= emitter_fermi, intervals, 0.0).sum(axis=-1)
     return np.sign(Vdc) * integral
 
 
-def rf_averaged_current(transmission_at_voltage, Eg, Vdc, Arf, cos_nodes):
+def rf_averaged_current(transmission_at_voltage, Eg, Vdc, Arf, cos_nodes,
+                        fermi_tip=E_F, fermi_samp=None):
     """Average the full instantaneous current over RF phase nodes.
 
     ``transmission_at_voltage`` must return transmission over ``Eg`` for one
@@ -104,7 +112,7 @@ def rf_averaged_current(transmission_at_voltage, Eg, Vdc, Arf, cos_nodes):
 
     phase_currents = [
         current(transmission_at_voltage(Vdc + Arf * cosine), Eg,
-                Vdc + Arf * cosine)
+                Vdc + Arf * cosine, fermi_tip, fermi_samp)
         for cosine in cos_nodes
     ]
     return float(np.mean(phase_currents))

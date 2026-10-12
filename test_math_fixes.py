@@ -15,7 +15,7 @@ from fer_rf_sim.engine import (
     image_potential, 
     airy_all, 
     transmission, 
-    calibrate_fudge,
+    fit_wkb_prefactor,
     current,
     current_batch,
     D_avg,
@@ -164,7 +164,8 @@ def test_constant_current_slice_varies_height_and_reaches_target():
     data = build_current_array(current_cube, voltage)
     result = constant_current_slice(4.0, heights, data)
     heights_at_target = result[..., 0]
-    expected_heights = np.array([4.0, 2.0, 4.0 / 3.0])
+    # Crossings are interpolated in log|I|, matching exponential tunneling decay.
+    expected_heights = np.array([4.0, 2.0, 1.0 + np.log2(4.0 / 3.0)])
     assert np.allclose(heights_at_target[:, 0], expected_heights)
     assert np.unique(heights_at_target).size > 1
     assert np.allclose(result[..., 1], expected_heights[:, None])
@@ -178,9 +179,37 @@ def test_constant_current_derivative_interpolates_on_increasing_height_axis():
     data = np.stack((current, derivative), axis=-1)
 
     result = constant_current_slice(3.0, heights, data)
+    fraction = np.log2(4.0 / 3.0)
 
-    assert result[0, 0, 0] == pytest.approx(2.5)
-    assert result[0, 0, 1] == pytest.approx(30.0)
+    assert result[0, 0, 0] == pytest.approx(2.0 + fraction)
+    assert result[0, 0, 1] == pytest.approx(40.0 - 20.0 * fraction)
+
+
+def test_constant_current_tolerates_noise_away_from_setpoint():
+    heights = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    current = np.array([8.0, 4.0, 2.0, 1e-16, 1.01e-16])[:, None, None]
+    data = np.stack((current, current), axis=-1)
+    result = constant_current_slice(3.0, heights, data)
+    fraction = np.log2(4.0 / 3.0)
+    assert result[0, 0, 0] == pytest.approx(2.0 + fraction)
+    assert result[0, 0, 1] == pytest.approx(4.0 - 2.0 * fraction)
+
+
+def test_constant_current_rejects_multiple_crossings():
+    heights = np.array([1.0, 2.0, 3.0, 4.0])
+    current = np.array([4.0, 2.0, 4.0, 1.0])[:, None, None]
+    data = np.stack((current, current), axis=-1)
+    assert np.all(np.isnan(constant_current_slice(3.0, heights, data)))
+
+
+def test_constant_current_uses_magnitude_at_negative_bias():
+    heights = np.array([1.0, 2.0, 3.0, 4.0])
+    current = -np.array([8.0, 4.0, 2.0, 1.0])[:, None, None]
+    derivative = np.array([80.0, 40.0, 20.0, 10.0])[:, None, None]
+    result = constant_current_slice(3.0, heights, np.stack((current, derivative), axis=-1))
+    fraction = np.log2(4.0 / 3.0)
+    assert result[0, 0, 0] == pytest.approx(2.0 + fraction)
+    assert result[0, 0, 1] == pytest.approx(40.0 - 20.0 * fraction)
 
 
 def test_post_processing_upsampling_validates_factors():
@@ -455,7 +484,7 @@ def test_direct_rf_grid_matches_scalar_rf_average():
     cos_nodes = np.cos(np.linspace(0.2, 2.8, 5))
     actual = direct_rf_current_grid(
         energy, voltages, amplitudes, 1.0, 4.0, 4.0,
-        fudge=3.8157756623464034, cos_nodes=cos_nodes, amplitude_chunk=1,
+        cos_nodes=cos_nodes, amplitude_chunk=1,
     )
     expected = np.empty_like(actual)
     for j, voltage in enumerate(voltages):
@@ -463,7 +492,6 @@ def test_direct_rf_grid_matches_scalar_rf_average():
             def direct_transmission(instantaneous_voltage):
                 return transmission(
                     energy, instantaneous_voltage, 1.0, 4.0, 4.0,
-                    fudge=3.8157756623464034,
                 )
 
             expected[j, k] = rf_averaged_current(
@@ -472,23 +500,23 @@ def test_direct_rf_grid_matches_scalar_rf_average():
     assert np.any(expected != 0)
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=0)
 
-def test_fudge_calibration():
-    """Test fudge factor calibration with edge cases."""
-    print("Testing fudge calibration...")
+def test_wkb_prefactor_fit():
+    """Test the WKB prefactor fit with edge cases."""
+    print("Testing WKB prefactor fit...")
     
-    fudge, samples = calibrate_fudge(
+    prefactor, samples = fit_wkb_prefactor(
         phi_t=4.0, phi_s=4.0, F1=0.2,
         D_min=0.3, D_max=5.0, n_D=10, n_E=50
     )
-    print(f"Normal case fudge: {fudge}, samples: {samples}")
-    assert np.isfinite(fudge), "Fudge factor should be finite"
-    assert fudge > 0, "Fudge factor should be positive"
+    print(f"Normal case prefactor: {prefactor}, samples: {samples}")
+    assert np.isfinite(prefactor), "WKB prefactor should be finite"
+    assert prefactor > 0, "WKB prefactor should be positive"
     assert samples.size > 0
 
     with pytest.raises(ValueError, match="0 < D_min < D_max"):
-        calibrate_fudge(4.0, 4.0, 0.2, D_min=0.0, D_max=5.0)
+        fit_wkb_prefactor(4.0, 4.0, 0.2, D_min=0.0, D_max=5.0)
     
-    print("✓ Fudge calibration tests passed")
+    print("✓ WKB prefactor fit tests passed")
 
 def test_edge_cases():
     """Test various edge cases that could cause problems."""
@@ -528,7 +556,7 @@ def main():
         test_current_calculation()
         print()
         
-        test_fudge_calibration()
+        test_wkb_prefactor_fit()
         print()
         
         test_edge_cases()

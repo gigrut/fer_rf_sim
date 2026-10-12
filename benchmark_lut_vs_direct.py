@@ -105,7 +105,7 @@ def benchmark_speedups(config=None, repeats=3):
 
     direct, direct_stats = measure_kernel(lambda: direct_rf_current_grid(
         energy, voltage, amplitudes, height, config.phi_tip, config.phi_samp,
-        1, nodes, config.amplitude_chunk,
+        nodes, config.amplitude_chunk,
     ))
     general, general_stats = measure_kernel(lambda: lut_rf_current_grid(
         lambda points: interpolator(points), energy, voltage, amplitudes, height,

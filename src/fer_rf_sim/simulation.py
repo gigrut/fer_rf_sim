@@ -3,7 +3,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 from joblib import Parallel, delayed
-from .physics import E_F, F_SWITCH, F_BLEND, transmission, calibrate_fudge
+from .physics import E_F, F_SWITCH, F_BLEND, transmission
 from .quadrature import current_batch, cosine_nodes
 from .lut_build import _upscaled_axis, build_lut, interp_lut
 
@@ -14,18 +14,22 @@ def _raise_if_cancelled(cancel_event):
 
 
 def direct_rf_current_grid(Eg, Vg, Ag, z, phi_tip, phi_samp,
-                           fudge, cos_nodes, amplitude_chunk=8, cancel_event=None):
+                           cos_nodes, amplitude_chunk=8, cancel_event=None, *,
+                           fermi_tip=E_F, fermi_samp=None):
     """Compute one height's RF current grid with batched direct transmission."""
     def evaluate(energy, voltage):
-        return transmission(energy, voltage, z, phi_tip, phi_samp, fudge=fudge)
-    return _rf_current_grid(evaluate, Eg, Vg, Ag, cos_nodes, amplitude_chunk, cancel_event)
+        return transmission(energy, voltage, z, phi_tip, phi_samp,
+                            fermi_tip=fermi_tip, fermi_samp=fermi_samp)
+    return _rf_current_grid(evaluate, Eg, Vg, Ag, cos_nodes, amplitude_chunk, cancel_event,
+                            fermi_tip, fermi_samp)
 
 
 def lut_rf_current_grid(interpolator, Eg, Vg, Ag, z, cos_nodes, amplitude_chunk=8,
-                        cancel_event=None):
+                        cancel_event=None, *, fermi_tip=E_F, fermi_samp=None):
     """Use the same batched current/phase integration as the direct path."""
     evaluate = _lut_evaluator(interpolator, z)
-    return _rf_current_grid(evaluate, Eg, Vg, Ag, cos_nodes, amplitude_chunk, cancel_event)
+    return _rf_current_grid(evaluate, Eg, Vg, Ag, cos_nodes, amplitude_chunk, cancel_event,
+                            fermi_tip, fermi_samp)
 
 
 def _lut_evaluator(interpolator, z):
@@ -62,7 +66,7 @@ def _lut_evaluator(interpolator, z):
     return evaluate
 
 
-def _rf_grid_inputs(Eg, Vg, Ag, cos_nodes, amplitude_chunk):
+def _rf_grid_inputs(Eg, Vg, Ag, cos_nodes, amplitude_chunk, fermi_tip=E_F, fermi_samp=None):
     from .repository import validate_axis
     Eg = validate_axis(Eg, "E", minimum=2)
     Vg = validate_axis(Vg, "V")
@@ -75,12 +79,15 @@ def _rf_grid_inputs(Eg, Vg, Ag, cos_nodes, amplitude_chunk):
             or np.any(np.abs(cos_nodes) > 1)):
         raise ValueError("cos_nodes must be a finite nonempty array in [-1, 1]")
 
-    Eg = Eg[(Eg >= 0) & (Eg <= E_F)]
+    # Keep energies up to the larger Fermi energy; current_batch applies the emitter's own limit.
+    Eg = Eg[(Eg >= 0) & (Eg <= max(fermi_tip, fermi_tip if fermi_samp is None else fermi_samp))]
     return Eg, Vg, Ag, cos_nodes
 
 
-def _rf_current_grid(evaluate, Eg, Vg, Ag, cos_nodes, amplitude_chunk, cancel_event=None):
-    Eg, Vg, Ag, cos_nodes = _rf_grid_inputs(Eg, Vg, Ag, cos_nodes, amplitude_chunk)
+def _rf_current_grid(evaluate, Eg, Vg, Ag, cos_nodes, amplitude_chunk, cancel_event=None,
+                     fermi_tip=E_F, fermi_samp=None):
+    Eg, Vg, Ag, cos_nodes = _rf_grid_inputs(Eg, Vg, Ag, cos_nodes, amplitude_chunk,
+                                            fermi_tip, fermi_samp)
     _raise_if_cancelled(cancel_event)
     result = np.zeros((Vg.size, Ag.size), dtype=np.float64)
     if Eg.size < 2:
@@ -88,7 +95,7 @@ def _rf_current_grid(evaluate, Eg, Vg, Ag, cos_nodes, amplitude_chunk, cancel_ev
     zero_rf = Ag == 0
     if np.any(zero_rf):
         spectra = evaluate(Eg[None, :], Vg[:, None])
-        result[:, zero_rf] = current_batch(spectra, Eg, Vg)[:, None]
+        result[:, zero_rf] = current_batch(spectra, Eg, Vg, fermi_tip, fermi_samp)[:, None]
 
     nonzero_rf = np.flatnonzero(~zero_rf)
     energy_grid = Eg[None, None, None, :]
@@ -101,15 +108,15 @@ def _rf_current_grid(evaluate, Eg, Vg, Ag, cos_nodes, amplitude_chunk, cancel_ev
         transmissions = evaluate(energy_grid, voltages)
         phase_voltages = voltages[..., 0]
         phase_currents = current_batch(
-            transmissions, Eg, phase_voltages,
+            transmissions, Eg, phase_voltages, fermi_tip, fermi_samp,
         )
         result[:, indices] = np.mean(phase_currents, axis=-1)
     return result
 
 
 def dc_table_rf_current_grid(evaluate, Eg, Vg, Ag, cos_nodes, *, initial_points=129,
-                             max_points=16385, rtol=1e-3, atol=1e-15, amplitude_chunk=8,
-                             cancel_event=None):
+                             max_points=16385, rtol=1e-3, atol=0.0, amplitude_chunk=8,
+                             cancel_event=None, fermi_tip=E_F, fermi_samp=None):
     """RF average of an adaptive DC-current table with sampled interpolation checks.
 
     Check each voltage interval at its quarter, midpoint and three-quarter points.
@@ -118,7 +125,8 @@ def dc_table_rf_current_grid(evaluate, Eg, Vg, Ag, cos_nodes, *, initial_points=
     """
     from numbers import Real
 
-    Eg, Vg, Ag, cos_nodes = _rf_grid_inputs(Eg, Vg, Ag, cos_nodes, amplitude_chunk)
+    Eg, Vg, Ag, cos_nodes = _rf_grid_inputs(Eg, Vg, Ag, cos_nodes, amplitude_chunk,
+                                            fermi_tip, fermi_samp)
     if Ag[0] < 0:
         raise ValueError("DC table RF amplitudes must be non-negative")
     for name, value in (("initial_points", initial_points), ("max_points", max_points)):
@@ -137,7 +145,7 @@ def dc_table_rf_current_grid(evaluate, Eg, Vg, Ag, cos_nodes, *, initial_points=
         return result, diagnostics
     if np.all(Ag == 0):
         spectra = evaluate(Eg[None, :], Vg[:, None])
-        result[:] = current_batch(spectra, Eg, Vg)[:, None]
+        result[:] = current_batch(spectra, Eg, Vg, fermi_tip, fermi_samp)[:, None]
         diagnostics["points"] = int(Vg.size)
         return result, diagnostics
 
@@ -148,7 +156,7 @@ def dc_table_rf_current_grid(evaluate, Eg, Vg, Ag, cos_nodes, *, initial_points=
             stop = min(start + 256, voltages.size)
             bias = voltages[start:stop]
             spectra = evaluate(Eg[None, :], bias[:, None])
-            currents[start:stop] = current_batch(spectra, Eg, bias)
+            currents[start:stop] = current_batch(spectra, Eg, bias, fermi_tip, fermi_samp)
         return currents
 
     voltages = np.linspace(Vg[0] - Ag[-1], Vg[-1] + Ag[-1], initial_points)
@@ -215,8 +223,7 @@ def _work_function_filename(value):
 def simulate(a, progress_callback=None, cancel_event=None):
     from fer_rf_sim.config import SimulationConfig
     from fer_rf_sim.provenance import (atomic_h5, canonical_json, numerical_identity, lut_spec,
-                                     SCHEMA_VERSION, MODEL_VERSION, CALIBRATION_VERSION,
-                                     CALIBRATION_SETTINGS)
+                                     SCHEMA_VERSION, MODEL_VERSION)
     from fer_rf_sim.lut_repository import lut_matches
     from uuid import uuid4
     a = SimulationConfig.from_namespace(a).as_namespace()
@@ -231,19 +238,14 @@ def simulate(a, progress_callback=None, cancel_event=None):
     dV = (a.v_max-a.v_min)/(a.n_V - 1)
     Vg_lut = np.linspace(a.v_min-a.A_max, a.v_max+a.A_max, a.n_V + int(np.ceil(2*a.A_max/dV)))
 
-    fudge, samples = calibrate_fudge(
-        phi_t=a.phi_tip, phi_s=a.phi_samp, F1=F_SWITCH,
-        D_min=a.z_min, D_max=a.z_max, **CALIBRATION_SETTINGS
-    )
-    print(f'Calibration: factor={fudge:.8g}, valid_samples={samples.size}')
-
     lut_file = None
     lut_identity = None
     lut_cache_status = "disabled"
     table_diagnostics = []
     table_options = {"initial_points": a.dc_table_points, "max_points": a.dc_table_max_points,
                      "rtol": a.dc_table_rtol, "atol": a.dc_table_atol,
-                     "amplitude_chunk": a.amplitude_chunk}
+                     "amplitude_chunk": a.amplitude_chunk,
+                     "fermi_tip": a.E_F_tip, "fermi_samp": a.E_F_samp}
     if getattr(a, 'use_lut', False):
         # Determine upscaling factors first
         upscale_z = getattr(a, 'upscale_z', None) or a.upscale
@@ -255,7 +257,8 @@ def simulate(a, progress_callback=None, cancel_event=None):
         E_lut = _upscaled_axis(Eg, upscale_e)
         
         # Create parameter-based LUT filename
-        spec = lut_spec(E_lut, V_lut, z_lut, a.phi_tip, a.phi_samp, fudge, E_F, F_SWITCH, F_BLEND)
+        spec = lut_spec(E_lut, V_lut, z_lut, a.phi_tip, a.phi_samp,
+                        a.E_F_tip, a.E_F_samp, F_SWITCH, F_BLEND)
         lut_identity = numerical_identity(spec)
         lut_filename = f"transmission_lut_{lut_identity}.h5"
         lut_file = out / lut_filename
@@ -275,7 +278,8 @@ def simulate(a, progress_callback=None, cancel_event=None):
             print(f'[build] LUT with upscaling factors: z={upscale_z}, v={upscale_v}, e={upscale_e}')
             lut = build_lut(
                 Eg, Vg_lut, zg, a.phi_tip, a.phi_samp,
-                upscale=upscale_factors, fudge=fudge, n_jobs=a.threads,
+                upscale=upscale_factors, n_jobs=a.threads,
+                fermi_tip=a.E_F_tip, fermi_samp=a.E_F_samp,
                 progress_callback=(
                     lambda completed, total: progress_callback("LUT", completed, total)
                 ) if progress_callback is not None else None,
@@ -288,14 +292,14 @@ def simulate(a, progress_callback=None, cancel_event=None):
                 f.create_dataset('z', data=z_lut)
                 f.attrs['phi_tip'] = a.phi_tip
                 f.attrs['phi_samp'] = a.phi_samp
+                f.attrs['E_F_tip'] = a.E_F_tip
+                f.attrs['E_F_samp'] = a.E_F_samp
                 f.attrs['F_switch'] = F_SWITCH
                 f.attrs['F_blend'] = F_BLEND
                 f.attrs['lut_identity'] = lut_identity
                 f.attrs['lut_spec_json'] = canonical_json(spec)
                 f.attrs['schema_version'] = SCHEMA_VERSION
                 f.attrs['model_version'] = MODEL_VERSION
-                f.attrs['calibration_version'] = CALIBRATION_VERSION
-                f.attrs['fudge_factor'] = fudge
                 f['D'].attrs['axis_order'] = 'z,V,E'
                 for name, unit in (('z', 'nm'), ('V', 'V'), ('E', 'eV'), ('D', 'probability')):
                     f[name].attrs['units'] = unit
@@ -315,6 +319,7 @@ def simulate(a, progress_callback=None, cancel_event=None):
             else:
                 r = lut_rf_current_grid(
                     interp, Eg, Vg, Ag, z, cos_nodes, a.amplitude_chunk, cancel_event,
+                    fermi_tip=a.E_F_tip, fermi_samp=a.E_F_samp,
                 )
             return i, r, diagnostics
         
@@ -337,7 +342,8 @@ def simulate(a, progress_callback=None, cancel_event=None):
             diagnostics = None
             if a.dc_table:
                 def evaluate(energy, voltage):
-                    return transmission(energy, voltage, z, a.phi_tip, a.phi_samp, fudge=fudge)
+                    return transmission(energy, voltage, z, a.phi_tip, a.phi_samp,
+                                        fermi_tip=a.E_F_tip, fermi_samp=a.E_F_samp)
                 r, diagnostics = dc_table_rf_current_grid(
                     evaluate, Eg, Vg, Ag, cos_nodes, cancel_event=cancel_event,
                     **table_options,
@@ -345,7 +351,8 @@ def simulate(a, progress_callback=None, cancel_event=None):
             else:
                 r = direct_rf_current_grid(
                     Eg, Vg, Ag, z, a.phi_tip, a.phi_samp,
-                    fudge, cos_nodes, a.amplitude_chunk, cancel_event,
+                    cos_nodes, a.amplitude_chunk, cancel_event,
+                    fermi_tip=a.E_F_tip, fermi_samp=a.E_F_samp,
                 )
             return i, r, diagnostics
         parallel_options = {"n_jobs": a.threads}
@@ -365,8 +372,7 @@ def simulate(a, progress_callback=None, cancel_event=None):
     effective_config = vars(a)
     identity_config = {key: value for key, value in effective_config.items()
                        if key not in ('out', 'threads', 'force_rebuild_lut', 'list_luts')}
-    config_identity = numerical_identity({'config': identity_config, 'model': MODEL_VERSION,
-                                         'calibration': CALIBRATION_VERSION})
+    config_identity = numerical_identity({'config': identity_config, 'model': MODEL_VERSION})
     run_id = uuid4().hex
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     current_filename = (
@@ -388,8 +394,6 @@ def simulate(a, progress_callback=None, cancel_event=None):
         f['I'].attrs['axis_order'] = 'z,V,A'
         f.attrs['schema_version'] = SCHEMA_VERSION
         f.attrs['model_version'] = MODEL_VERSION
-        f.attrs['calibration_version'] = CALIBRATION_VERSION
-        f.attrs['calibration_settings_json'] = canonical_json(CALIBRATION_SETTINGS)
         f.attrs['effective_config_json'] = canonical_json(effective_config)
         f.attrs['config_identity'] = config_identity
         f.attrs['run_id'] = run_id
@@ -411,8 +415,8 @@ def simulate(a, progress_callback=None, cancel_event=None):
         f.attrs['n_A'] = int(a.n_A)
         f.attrs['n_cheb'] = int(a.n_cheb)
         f.attrs['use_lut'] = getattr(a, 'use_lut', False)
-        f.attrs['fudge_factor'] = fudge
-        f.attrs['E_F'] = E_F
+        f.attrs['E_F_tip'] = float(a.E_F_tip)
+        f.attrs['E_F_samp'] = float(a.E_F_samp)
         f.attrs['F_switch'] = F_SWITCH
         f.attrs['F_blend'] = F_BLEND
         f.attrs['current_units'] = 'normalized'

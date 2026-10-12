@@ -248,7 +248,18 @@ def detect_peaks(
     widths, _, left_indices, right_indices = peak_widths(
         signal, indices, rel_height=width_reference,
     )
-    positions = x[indices]
+    positions = x[indices].astype(np.float64)
+    # Parabolic vertex through each peak and its neighbours avoids grid-quantized ("terraced") positions.
+    interior = (indices > 0) & (indices < x.size - 1)
+    i = indices[interior]
+    x0, x1, x2 = x[i - 1], x[i], x[i + 1]
+    y0, y1, y2 = signal[i - 1], signal[i], signal[i + 1]
+    numerator = (x1 - x0) ** 2 * (y1 - y2) - (x1 - x2) ** 2 * (y1 - y0)
+    denominator = (x1 - x0) * (y1 - y2) - (x1 - x2) * (y1 - y0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        vertex = x1 - 0.5 * numerator / denominator
+    usable = np.isfinite(vertex) & (vertex > x0) & (vertex < x2)
+    positions[np.flatnonzero(interior)[usable]] = vertex[usable]
     left_positions = np.interp(left_indices, np.arange(x.size), x)
     right_positions = np.interp(right_indices, np.arange(x.size), x)
 

@@ -12,9 +12,7 @@ import numpy as np
 
 
 SCHEMA_VERSION = 2
-MODEL_VERSION = "trapezoidal-scaled-airy-3"
-CALIBRATION_VERSION = "explicit-branches-1"
-CALIBRATION_SETTINGS = {"n_D": 100, "n_E": 200, "E_min": 0.01, "z_switch": 8.0}
+MODEL_VERSION = "trapezoidal-scaled-airy-5"
 
 
 def canonical_json(values):
@@ -26,11 +24,10 @@ def numerical_identity(values):
     return hashlib.sha256(canonical_json(values).encode("utf-8")).hexdigest()
 
 
-def lut_spec(energy, voltage, heights, phi_tip, phi_samp, fudge, fermi, switch, blend):
+def lut_spec(energy, voltage, heights, phi_tip, phi_samp, fermi_tip, fermi_samp, switch, blend):
     return {"schema_version": SCHEMA_VERSION, "model_version": MODEL_VERSION,
-            "calibration_version": CALIBRATION_VERSION, "calibration_settings": CALIBRATION_SETTINGS,
-            "phi_tip": phi_tip, "phi_samp": phi_samp, "fudge_factor": fudge,
-            "E_F": fermi, "F_switch": switch, "F_blend": blend,
+            "phi_tip": phi_tip, "phi_samp": phi_samp,
+            "E_F_tip": fermi_tip, "E_F_samp": fermi_samp, "F_switch": switch, "F_blend": blend,
             "axes": {name: np.asarray(axis, dtype=np.float64).tolist()
                      for name, axis in (("E", energy), ("V", voltage), ("z", heights))},
             "axis_order": ["z", "V", "E"], "dtype": "float64"}

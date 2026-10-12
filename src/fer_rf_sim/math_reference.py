@@ -14,8 +14,9 @@ MATH_SECTIONS = (
         contours and their voltage derivatives.</p>
         <table cellspacing="8">
         <tr><th align="left">Symbol</th><th align="left">Meaning</th></tr>
-        <tr><td>E, E<sub>F</sub></td><td>Electron energy and Fermi energy in eV;
-        E<sub>F</sub> = 5.5 eV in the transmission model.</td></tr>
+        <tr><td>E, E<sub>F</sub></td><td>Electron energy in eV, measured from the
+        emitting electrode's band bottom, and the Fermi energies of the tip and
+        sample (5.5 eV each by default; simulation settings).</td></tr>
         <tr><td>V, A</td><td>DC bias and peak RF voltage amplitude in V.</td></tr>
         <tr><td>Z, d</td><td>Tip height Z and barrier thickness d = Z in nm.
         The kernel receives the height directly, without conversion.</td></tr>
@@ -44,8 +45,10 @@ MATH_SECTIONS = (
         functions and uses V<sub>eff</sub> = |V|. For positive bias,
         &phi;<sub>1</sub> = &phi;<sub>t</sub> and
         &phi;<sub>2</sub> = &phi;<sub>s</sub>; for negative bias these swap.</p>
-        <p>W<sub>0</sub> = &phi;<sub>1</sub> + E<sub>F</sub> - E<br>
-        W<sub>d</sub> = &phi;<sub>2</sub> + E<sub>F</sub> - E - V<sub>eff</sub><br>
+        <p>With E<sub>F,e</sub> the Fermi energy of the emitting electrode
+        (tip for V &ge; 0, sample for V &lt; 0), and Fermi levels aligned at zero bias:</p>
+        <p>W<sub>0</sub> = &phi;<sub>1</sub> + E<sub>F,e</sub> - E<br>
+        W<sub>d</sub> = &phi;<sub>2</sub> + E<sub>F,e</sub> - E - V<sub>eff</sub><br>
         F = (V<sub>eff</sub> + &phi;<sub>1</sub> - &phi;<sub>2</sub>) / d<br>
         W(x) = W<sub>0</sub> - F x, &nbsp; 0 &le; x &le; d</p>
         <p>W is the barrier energy relative to the incident electron.
@@ -73,7 +76,7 @@ MATH_SECTIONS = (
         <p>This branch is valid only when both W<sub>0</sub> &gt; 0 and
         W<sub>d</sub> &gt; 0. F is signed; using |F| in the denominator would
         be incorrect for a barrier that rises with x. The dimensionless
-        factor f can be calibrated against the Airy branch, not against a
+        factor f can be fitted against the Airy branch, not against a
         measured absolute current. <b>WKB is an explicit comparison mode,
         not the active default transmission.</b></p>
         <h3>Rectangular limit</h3>
@@ -105,7 +108,9 @@ MATH_SECTIONS = (
         the transmitted amplitude. The transmission is a flux ratio, so it
         includes the outgoing-to-incoming wave-number ratio k<sub>3</sub>/k<sub>1</sub>.</p>
         <p class="equation">k<sub>1</sub> = a sqrt(max(E, 10<sup>-3</sup>))<br>
-        k<sub>3</sub> = a sqrt(max(E + |V|, 10<sup>-12</sup>)).</p>
+        k<sub>3</sub> = a sqrt(max(E + |V| - E<sub>F,e</sub> + E<sub>F,c</sub>, 10<sup>-12</sup>)),</p>
+        <p>where E<sub>F,e</sub> and E<sub>F,c</sub> are the Fermi energies of the
+        emitting and collecting electrodes. They are equal by default.</p>
         <p>Let A<sub>0</sub> = Ai(&eta;(0)), B<sub>0</sub> = Bi(&eta;(0)),
         A<sub>d</sub> = Ai(&eta;(d)), B<sub>d</sub> = Bi(&eta;(d)). Primes
         below mean derivatives with respect to &eta;, not x.</p>
@@ -128,11 +133,13 @@ MATH_SECTIONS = (
         Its near-zero-field case uses analytic rectangular matching, as
         detailed in the next topic.</p>
         <h3>Numerical Airy evaluation</h3>
-        <p>The unscaled airy_all helper is used when the barrier is not
-        positive at both ends. For |&eta;| &le; 8, SciPy evaluates Ai, Ai', Bi and Bi' directly.
-        Outside that range, the code uses the following asymptotic
-        expressions. These are numerical approximations, not additional
-        physical interactions.</p>
+        <p>When the barrier is not positive at both ends, transmission uses
+        exact SciPy Airy values at every &eta;: exponentially scaled (airye)
+        for &eta; &gt; 0, unscaled for &eta; &le; 0, with the exp(&plusmn;s)
+        factors recombined analytically. The legacy airy_all helper below
+        (two-term asymptotics past |&eta;| = 8) is no longer used by
+        transmission; its truncation error made ln T jagged in bias and
+        produced a grid-scale wobble in constant-current dZ/dV.</p>
         <p>For &eta; &gt; 8, put t = (2/3)&eta;<sup>3/2</sup>:</p>
         <p class="equation">Ai &asymp; exp(-t) (1 - 5/(72t))
         / (2 sqrt(&pi;) &eta;<sup>1/4</sup>)<br>
@@ -156,12 +163,12 @@ MATH_SECTIONS = (
     ),
     (
         "hybrid",
-        "Stable low-field matching and legacy calibration",
+        "Stable low-field matching and the WKB prefactor",
         """
         <p><b>Active default:</b> scaled Airy boundary matching, including
         an analytic near-rectangular limit. The compatibility mode name
         "hybrid" does not mean that a WKB/Airy switch is still applied.
-        The current model is trapezoidal-scaled-airy-3.</p>
+        The current model is trapezoidal-scaled-airy-5.</p>
         <h3>A stable barrier action</h3>
         <p>For two positive barrier endpoints the integrated decay is
         evaluated without subtracting nearly equal powers or dividing by F:</p>
@@ -208,14 +215,15 @@ MATH_SECTIONS = (
         If either endpoint is nonpositive, the unscaled tilted branch is
         used at nonzero field; a zero-field point without positive endpoints
         retains zero transmission.</p>
-        <h3>Legacy WKB calibration</h3>
+        <h3>Legacy WKB prefactor</h3>
         <p>The legacy constants are F<sub>1</sub> = 0.2 V/nm and
         b = 0.05 V/nm. F1 and F_blend arguments remain accepted for
         compatibility, but do not control the active transmission. Earlier
         models used a smoothstep blend in log probability; that transition
         is no longer applied.</p>
-        <p>The simulation still computes and records a comparison
-        calibration factor. It samples distances d<sub>i</sub>
+        <p>The simulation no longer computes or records this factor; it is
+        available only as the standalone helper fit_wkb_prefactor for comparing
+        explicit WKB against Airy. It samples distances d<sub>i</sub>
         and voltages V<sub>i</sub> = d<sub>i</sub>F<sub>1</sub>
         - &phi;<sub>t</sub> + &phi;<sub>s</sub>, then evaluates unscaled
         WKB and Airy on an energy grid below E<sub>F</sub>. At each distance
@@ -226,13 +234,12 @@ MATH_SECTIONS = (
         = &Sigma;<sub>j</sub>(T<sub>Airy,ij</sub> T<sub>WKB,ij</sub>)
         / &Sigma;<sub>j</sub>T<sub>WKB,ij</sub><sup>2</sup><br>
         f = mean of finite positive f<sub>i</sub> with nonzero denominator.</p>
-        <p>No valid calibration samples is an error. The factor applies only
+        <p>No valid samples is an error. The factor applies only
         to explicit WKB evaluation, not the active Airy result. This is a
         numerical comparison, not a fit to experimental resonances or a
         tunnelling-current calibration.</p>
         <p><b>Implementation:</b> physics._forbidden_barrier_transmission,
-        transmission, calibrate_fudge;
-        simulation.simulate.</p>
+        transmission, fit_wkb_prefactor.</p>
         """,
     ),
     (
@@ -241,17 +248,19 @@ MATH_SECTIONS = (
         """
         <p>Transmission is integrated with an occupation/supply weight.
         For the instantaneous voltage v, the implemented model is</p>
-        <p class="equation">w(E, v) = min(|v|, E<sub>F</sub> - E),
-        &nbsp; 0 &le; E &le; E<sub>F</sub><br>
+        <p class="equation">w(E, v) = min(|v|, E<sub>F,e</sub> - E),
+        &nbsp; 0 &le; E &le; E<sub>F,e</sub><br>
         I<sub>0</sub>(v, Z) = sign(v)
-        &int;<sub>0</sub><sup>E<sub>F</sub></sup>
+        &int;<sub>0</sub><sup>E<sub>F,e</sub></sup>
         w(E, v) T(E, v, Z) dE.</p>
-        <p>For |v| &lt; E<sub>F</sub>, the weight is |v| up to
-        E<sub>F</sub> - |v|, then decreases linearly to zero. For
-        |v| &ge; E<sub>F</sub>, it is E<sub>F</sub> - E throughout.
+        <p>The upper limit is the emitting electrode's Fermi energy (a low-temperature
+        assumption): the tip's for v &ge; 0 and the sample's for v &lt; 0.
+        For |v| &lt; E<sub>F,e</sub>, the weight is |v| up to
+        E<sub>F,e</sub> - |v|, then decreases linearly to zero. For
+        |v| &ge; E<sub>F,e</sub>, it is E<sub>F,e</sub> - E throughout.
         The sign sets the current direction, and I<sub>0</sub>(0, Z) = 0.</p>
         <h3>Discrete energy integral</h3>
-        <p>Only supplied energy samples inside [0, E<sub>F</sub>] are kept.
+        <p>Only supplied energy samples inside [0, E<sub>F,e</sub>] are kept.
         For Y<sub>j</sub> = w(E<sub>j</sub>, v) T(E<sub>j</sub>, v, Z),
         the composite trapezoid rule gives</p>
         <p class="equation">I<sub>0</sub> &asymp; sign(v)
@@ -355,10 +364,12 @@ MATH_SECTIONS = (
         <p class="equation">Z<sub>*</sub> = Z<sub>1</sub>
         + (Z<sub>2</sub> - Z<sub>1</sub>)
         (I<sub>*</sub> - I<sub>1</sub>) / (I<sub>2</sub> - I<sub>1</sub>).</p>
-        <p>Both strictly increasing and strictly decreasing height-current
-        curves are accepted. Plateaus, nonmonotonic curves, nonfinite
-        columns and targets outside the sampled current range produce NaN.
-        Exact endpoints are included; inversion never extrapolates.</p>
+        <p>The setpoint is a magnitude, so I is replaced by |I| (negative
+        bias). A column is accepted when |I| crosses the target exactly once;
+        noise far from the target does not reject it. Multiple crossings,
+        plateaus at the target, nonfinite columns and targets outside the
+        sampled range produce NaN. Exact endpoints are included; inversion
+        never extrapolates.</p>
         <h3>Fixed-height conductance-like derivative</h3>
         <p>First, G = &part;I/&part;V is computed on the original current
         grid using NumPy gradient with the actual voltage coordinates.
@@ -650,7 +661,7 @@ MATH_SECTIONS = (
         "Model assumptions and convergence checks",
         """
         <p>The core calculation is a one-dimensional, free-electron,
-        linear vacuum-barrier model with fixed E<sub>F</sub>, quasistatic
+        linear vacuum-barrier model with zero-temperature Fermi levels, quasistatic
         sinusoidal RF bias and normalized current. It is not a full
         atomistic STM model.</p>
         <ul>

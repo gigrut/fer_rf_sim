@@ -104,10 +104,14 @@ def invert_current_for_constant_I_4D_vectorized(I_target, D_vals, M):
     Find, for each (V, A) pair, the tip height D such that I(D, V, A) == I_target,
     then return both that D and the corresponding dI/dV at that height.
 
+    The setpoint is a current magnitude, so negative-bias columns are inverted
+    on ``|I|``. A column is valid when ``|I|`` crosses the setpoint exactly once;
+    unrelated non-monotonic noise far from the setpoint does not reject it.
+
     Parameters
     ----------
     I_target : float
-        Desired current level to slice at.
+        Desired current magnitude to slice at.
     D_vals : np.ndarray, shape (nD,)
         Tip-height grid over which I is defined.
     M : np.ndarray, shape (nD, nV, nA, 2)
@@ -127,37 +131,32 @@ def invert_current_for_constant_I_4D_vectorized(I_target, D_vals, M):
     if not np.isscalar(I_target) or not np.isfinite(I_target):
         raise ValueError("I_target must be a finite scalar")
     nD,nV,nA,_ = M.shape
-    if D_vals.ndim != 1 or D_vals.size != nD:
-        raise ValueError("D_vals must match the first dimension of M")
-    if np.any(np.diff(D_vals) <= 0):
-        raise ValueError("D_vals must be strictly increasing")
-    Dt = np.full((nV,nA), np.nan)
-    dIdVt = np.full((nV,nA), np.nan)
-    for j in range(nV):
-        for k in range(nA):
-            I_vs_D = M[:,j,k,0]
-            dIdV_vs_D = M[:,j,k,1]
-            if not np.all(np.isfinite(I_vs_D)) or not np.all(np.isfinite(dIdV_vs_D)):
-                continue
+    current = M[..., 0]
+    derivative = M[..., 1]
+    finite = np.isfinite(current).all(axis=0) & np.isfinite(derivative).all(axis=0)
+    with np.errstate(invalid="ignore"):
+        offset = np.abs(current) - abs(float(I_target))
+        exact = offset == 0
+        crossing = offset[:-1] * offset[1:] < 0
+    valid = finite & (exact.sum(axis=0) + crossing.sum(axis=0) == 1)
 
-            # Ensure a strictly monotonic current curve before inversion.
-            if I_vs_D[0] > I_vs_D[-1]:
-                current_axis = I_vs_D[::-1]
-                height_axis = D_vals[::-1]
-            else:
-                current_axis = I_vs_D
-                height_axis = D_vals
-            if np.any(np.diff(current_axis) <= 0):
-                continue
-            if not current_axis[0] <= I_target <= current_axis[-1]:
-                continue
-
-            # invert current to find D
-            Di = np.interp(I_target, current_axis, height_axis)
-            Dt[j,k] = Di
-
-            # D_vals remains increasing even when current decreases with height.
-            dIdVt[j,k] = np.interp(Di, D_vals, dIdV_vs_D)
+    has_exact = exact.any(axis=0)
+    lower = np.where(has_exact, np.argmax(exact, axis=0), np.argmax(crossing, axis=0))
+    upper = np.minimum(lower + 1, nD - 1)
+    take = lambda values, index: np.take_along_axis(values, index[None], axis=0)[0]
+    left, right = take(offset, lower), take(offset, upper)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fraction = np.where(has_exact, 0.0, left / (left - right))
+        if I_target != 0:
+            # Current is ~exponential in z; interpolating log|I| removes a cell-phase-dependent ripple in Z(V).
+            log_offset = np.log(np.abs(current)) - np.log(abs(float(I_target)))
+            log_left, log_right = take(log_offset, lower), take(log_offset, upper)
+            log_fraction = log_left / (log_left - log_right)
+            fraction = np.where(~has_exact & np.isfinite(log_fraction), log_fraction, fraction)
+        Dt = D_vals[lower] + fraction * (D_vals[upper] - D_vals[lower])
+        dIdVt = take(derivative, lower) + fraction * (take(derivative, upper) - take(derivative, lower))
+    Dt[~valid] = np.nan
+    dIdVt[~valid] = np.nan
     return Dt, dIdVt
 
 

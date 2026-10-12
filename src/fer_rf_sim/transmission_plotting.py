@@ -11,7 +11,7 @@ AXIS_NAMES = ("Z", "V", "A", "E")
 def simulation_transmission_source(data):
     """Use the artifact's linked LUT, or recompute with the active direct model."""
     from .lut_repository import lut_interpolator
-    from .physics import transmission
+    from .physics import E_F, transmission
     from .provenance import MODEL_VERSION
 
     linkage = data.metadata.get("lut_file")
@@ -25,13 +25,18 @@ def simulation_transmission_source(data):
     try:
         phi_tip = float(data.metadata["phi_tip"])
         phi_samp = float(data.metadata["phi_samp"])
+        fermi_tip = float(data.metadata.get("E_F_tip", data.metadata.get("E_F", E_F)))
+        fermi_samp = float(data.metadata.get("E_F_samp", fermi_tip))
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("Tunneling probability requires phi_tip and phi_samp metadata") from error
     if not np.isfinite([phi_tip, phi_samp]).all() or min(phi_tip, phi_samp) <= 0:
         raise ValueError("Work-function metadata must be finite and positive")
+    if not np.isfinite([fermi_tip, fermi_samp]).all() or min(fermi_tip, fermi_samp) <= 0:
+        raise ValueError("Fermi-energy metadata must be finite and positive")
 
     def evaluate(points):
-        return transmission(points[:, 2], points[:, 1], points[:, 0], phi_tip, phi_samp)
+        return transmission(points[:, 2], points[:, 1], points[:, 0], phi_tip, phi_samp,
+                            fermi_tip=fermi_tip, fermi_samp=fermi_samp)
 
     return evaluate, f"Recomputed with active model {MODEL_VERSION} (not stored transmission)"
 

@@ -59,10 +59,11 @@ The active model uses scaled Airy barrier matching and an analytic rectangular
 limit at zero electric field. For tip/sample work functions of 4/5 eV, this limit
 is at 1 V bias, not at zero bias. The previous calibrated WKB/Airy transition
 could introduce a false peak or dip near this voltage even with zero RF.
-Explicit WKB evaluation remains available for comparison; its global calibration
-factor is no longer applied to the active transmission calculation.
+Explicit WKB evaluation remains available for comparison; its prefactor
+(`wkb_prefactor`) is no longer applied to the active transmission calculation,
+and simulations no longer compute or store it.
 
-The numerical model version is `trapezoidal-scaled-airy-3`, so older cached LUTs
+The numerical model version is `trapezoidal-scaled-airy-5`, so older cached LUTs
 are not reused for new runs. Existing HDF5 results remain unchanged and readable;
 rerun the simulation to obtain corrected current and derived spectra.
 

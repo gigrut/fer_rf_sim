@@ -69,7 +69,6 @@ def print_simulation_summary(file_path):
     print(f"  Voltage range: {data['v_min']:.1f} to {data['v_max']:.1f} V")
     print(f"  Tip height range: {data['z_min']:.1f} to {data['z_max']:.1f} nm")
     print(f"  RF amplitude range: {data['A_min']:.1f} to {data['A_max']:.1f} V")
-    print(f"  Fudge factor: {data.get('fudge_factor', 'unknown')}")
     print(f"  Used LUT: {data.get('use_lut', 'unknown')}")
     print(f"  Provenance: {data['provenance']}; units: {data['current_units']}")
     

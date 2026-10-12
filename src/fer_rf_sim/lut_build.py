@@ -1,7 +1,7 @@
 import numpy as np
 from joblib import Parallel, delayed
 from scipy.interpolate import RegularGridInterpolator
-from .physics import transmission
+from .physics import E_F, transmission
 
 
 def _upscaled_axis(values, factor):
@@ -13,8 +13,8 @@ def _upscaled_axis(values, factor):
     return np.linspace(values[0], values[-1], (values.size - 1) * factor + 1)
 
 
-def build_lut(Eg, Vg, zg, phi_t, phi_s, upscale=1, fudge=1, n_jobs=-1,
-              progress_callback=None, cancel_event=None):
+def build_lut(Eg, Vg, zg, phi_t, phi_s, upscale=1, n_jobs=-1,
+              progress_callback=None, cancel_event=None, fermi_tip=E_F, fermi_samp=None):
     """
     Build a transmission lookup table over (z,V,E), with optional upscaling.
 
@@ -58,7 +58,8 @@ def build_lut(Eg, Vg, zg, phi_t, phi_s, upscale=1, fudge=1, n_jobs=-1,
                 raise InterruptedError("Simulation cancelled by user")
             stop = min(start + 64, len(V_lut))
             D[start:stop] = transmission(
-                Emesh[start:stop], Vmesh[start:stop], zval, phi_t, phi_s, fudge=fudge,
+                Emesh[start:stop], Vmesh[start:stop], zval, phi_t, phi_s,
+                fermi_tip=fermi_tip, fermi_samp=fermi_samp,
             )
         return i, D
 

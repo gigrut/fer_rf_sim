@@ -19,10 +19,23 @@ def test_explicit_default_and_false_override_yaml(tmp_path):
     {"n_E": 2.5}, {"n_A": True}, {"v_min": 1, "v_max": 1}, {"E_max": float("inf")},
     {"phi_tip": float("nan")}, {"threads": 0}, {"upscale_z": 0}, {"upscale_v": 1.1},
     {"e_extra": -6}, {"use_lut": "false"}, {"A_min": 1, "A_max": 1},
+    {"E_F_tip": 6.0}, {"E_F_tip": 0.005}, {"E_F_tip": float("nan")}, {"E_F_tip": True},
+    {"E_F_samp": 6.0}, {"E_F_samp": 0.005}, {"E_F_samp": float("nan")}, {"E_F_samp": True},
 ])
 def test_invalid_config_rejected(values):
     with pytest.raises(ValueError):
         SimulationConfig(**values).validate()
+
+
+def test_fermi_energies_from_yaml_and_cli_are_independent(tmp_path):
+    config_path = tmp_path / "settings.yaml"
+    config_path.write_text("simulation:\n  E_F_tip: 4.5\n  E_F_samp: 5.0\n")
+    config = parse_config(["--config", str(config_path)])
+    assert (config.E_F_tip, config.E_F_samp) == (4.5, 5.0)
+    config = parse_config(["--config", str(config_path), "--E-F-samp", "4.0"])
+    assert (config.E_F_tip, config.E_F_samp) == (4.5, 4.0)
+    assert SimulationConfig().E_F_tip == SimulationConfig().E_F_samp == 5.5
+    assert SimulationConfig(E_max=7.0, E_F_tip=6.5, E_F_samp=5.0).E_F_tip == 6.5
 
 
 def test_unknown_config_keys_and_missing_files(tmp_path):

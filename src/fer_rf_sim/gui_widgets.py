@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from threading import Event
 
@@ -15,6 +16,7 @@ from fer_rf_sim.service import SimulationConfig, SimulationRunner
 from .config import load_config
 from .math_reference import MATH_SECTIONS, math_reference_html
 from .peak_widgets import PeakAnalysisPanel
+from .peaks import _finite_gradient
 from .plotly_host import PlotlyDocument, PlotlyHost
 from .quadrature import chebyshev_phases
 from .transmission_plotting import requested_transmission_grid, simulation_transmission_source
@@ -246,10 +248,14 @@ class MainWindow(QMainWindow):
         self.A_max = self._number_field(self.config.A_max)
         self.phi_tip = self._number_field(self.config.phi_tip)
         self.phi_samp = self._number_field(self.config.phi_samp)
+        self.E_F_tip = self._number_field(self.config.E_F_tip)
+        self.E_F_samp = self._number_field(self.config.E_F_samp)
+        for field in (self.E_F_tip, self.E_F_samp):
+            field.setToolTip("Fermi energy above this electrode's band bottom; must lie within the energy range")
         self.output = QLineEdit(str(self.config.out))
         self._initial_values = {name: getattr(self, name).value() for name in (
             "n_E", "n_V", "n_Z", "n_A", "n_cheb", "E_min", "E_max", "v_min", "v_max",
-            "z_min", "z_max", "A_min", "A_max", "phi_tip", "phi_samp",
+            "z_min", "z_max", "A_min", "A_max", "phi_tip", "phi_samp", "E_F_tip", "E_F_samp",
         )}
         self._initial_values["out"] = self.output.text()
         self._initial_values.update(use_lut=self.config.use_lut, dc_table=self.config.dc_table)
@@ -271,7 +277,11 @@ class MainWindow(QMainWindow):
                 ("Tip (eV)", self.phi_tip),
                 ("Sample (eV)", self.phi_samp),
             )),
-            ("Sweep ranges", 0, 1, 2, (
+            ("Fermi energies", 2, 0, 1, (
+                ("Tip (eV)", self.E_F_tip),
+                ("Sample (eV)", self.E_F_samp),
+            )),
+            ("Sweep ranges", 0, 1, 3, (
                 ("Energy minimum (eV)", self.E_min),
                 ("Energy maximum (eV)", self.E_max),
                 ("Bias minimum (V)", self.v_min),
@@ -528,6 +538,17 @@ class MainWindow(QMainWindow):
         self.real_spectrum_slider.setMaximum(0)
         self.real_spectrum_slider.valueChanged.connect(self._render_real_plot)
         controls.addWidget(self.real_spectrum_slider, stretch=1)
+        self.real_spectrum_index = QSpinBox()
+        self.real_spectrum_index.setRange(1, 1)
+        self.real_spectrum_index.setKeyboardTracking(False)
+        self.real_spectrum_index.setToolTip("Spectrum number")
+        self.real_spectrum_index.valueChanged.connect(
+            lambda number: self.real_spectrum_slider.setValue(number - 1)
+        )
+        self.real_spectrum_slider.valueChanged.connect(
+            lambda index: self.real_spectrum_index.setValue(index + 1)
+        )
+        controls.addWidget(self.real_spectrum_index)
         self.real_spectrum_value = QLabel("No spectrum selected")
         self.real_spectrum_value.setProperty("role", "muted")
         self.real_spectrum_value.setWordWrap(True)
@@ -578,6 +599,10 @@ class MainWindow(QMainWindow):
         self.real_spectrum_slider.setMaximum(len(self.real_spectra) - 1)
         self.real_spectrum_slider.setValue(0)
         self.real_spectrum_slider.blockSignals(False)
+        self.real_spectrum_index.blockSignals(True)
+        self.real_spectrum_index.setRange(1, max(len(self.real_spectra), 1))
+        self.real_spectrum_index.setValue(1)
+        self.real_spectrum_index.blockSignals(False)
         self.real_data_status.setText(
             f"Loaded {len(self.real_spectra)} real spectra from:\n{path}"
         )
@@ -647,6 +672,8 @@ class MainWindow(QMainWindow):
             "Fixed-height dI/dV heatmap",
             "Constant-current dI/dV heatmap",
             "Constant-current dI/dV trace",
+            "Constant-current dZ/dV heatmap",
+            "Constant-current dZ/dV trace",
         ])
         self.simulated_view_type.currentTextChanged.connect(self._render_simulated_plot)
         self.simulated_view_type.setMinimumWidth(285)
@@ -676,6 +703,23 @@ class MainWindow(QMainWindow):
         self.simulated_color_scale.setCurrentText("Log10")
         self.simulated_color_scale.currentTextChanged.connect(self._render_simulated_plot)
         axis_controls.addWidget(self.simulated_color_scale)
+        axis_controls.addWidget(QLabel("Color range"))
+        self.simulated_color_range = QComboBox()
+        self.simulated_color_range.addItems(["Full", "Clip 1%", "Clip 5%", "Manual"])
+        self.simulated_color_range.setToolTip(
+            "Clip ignores the given fraction of extreme pixels at each end; "
+            "Manual limits are in the plotted (possibly log10) units"
+        )
+        self.simulated_color_range.currentTextChanged.connect(self._render_simulated_plot)
+        axis_controls.addWidget(self.simulated_color_range)
+        self.simulated_color_min = QLineEdit()
+        self.simulated_color_max = QLineEdit()
+        for editor, name in ((self.simulated_color_min, "min"), (self.simulated_color_max, "max")):
+            editor.setPlaceholderText(name)
+            editor.setFixedWidth(80)
+            editor.setValidator(QDoubleValidator())
+            editor.editingFinished.connect(self._render_simulated_plot)
+            axis_controls.addWidget(editor)
         axis_controls.addStretch()
         layout.addLayout(axis_controls)
 
@@ -690,10 +734,13 @@ class MainWindow(QMainWindow):
         self.simulated_rf_slider.setTracking(False)
         self.simulated_rf_slider.valueChanged.connect(self._render_simulated_plot)
         rf_controls.addWidget(self.simulated_rf_slider, stretch=1)
-        self.simulated_rf_value = QLabel("n/a")
-        self.simulated_rf_value.setProperty("role", "value")
-        self.simulated_rf_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.simulated_rf_value.setFixedWidth(110)
+        self.simulated_rf_value = self._slider_value_editor(
+            lambda: self._snap_slider_to_value(
+                self.simulated_rf_slider, self.simulated_rf_value,
+                None if self.simulated_data is None else self.simulated_data.rf_amplitude,
+                fmt="{:.4g} V",
+            )
+        )
         rf_controls.addWidget(self.simulated_rf_value)
         layout.addLayout(rf_controls)
 
@@ -708,10 +755,13 @@ class MainWindow(QMainWindow):
         self.simulated_energy_slider.setTracking(False)
         self.simulated_energy_slider.valueChanged.connect(self._render_simulated_plot)
         energy_controls.addWidget(self.simulated_energy_slider, stretch=1)
-        self.simulated_energy_value = QLabel("n/a")
-        self.simulated_energy_value.setProperty("role", "value")
-        self.simulated_energy_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.simulated_energy_value.setFixedWidth(110)
+        self.simulated_energy_value = self._slider_value_editor(
+            lambda: self._snap_slider_to_value(
+                self.simulated_energy_slider, self.simulated_energy_value,
+                None if self.simulated_data is None else self.simulated_data.energy,
+                fmt="{:.4g} eV",
+            )
+        )
         energy_controls.addWidget(self.simulated_energy_value)
         self.simulated_energy_controls.hide()
         layout.addWidget(self.simulated_energy_controls)
@@ -731,11 +781,17 @@ class MainWindow(QMainWindow):
         self.simulated_current_slider.valueChanged.connect(
             self._render_simulated_plot
         )
+        self.simulated_current_slider.setToolTip(
+            "Setpoint |I| from 1e-12 to 1e-6, applied to stored current values "
+            "(simulation current is normalized: 1 model unit is shown as 1 A)"
+        )
         setpoint_controls.addWidget(self.simulated_current_slider, stretch=1)
-        self.simulated_current_value = QLabel("n/a")
-        self.simulated_current_value.setProperty("role", "value")
-        self.simulated_current_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.simulated_current_value.setFixedWidth(110)
+        self.simulated_current_value = self._slider_value_editor(
+            lambda: self._snap_slider_to_value(
+                self.simulated_current_slider, self.simulated_current_value,
+                self.constant_current_targets, fmt="{:.3e} A", log=True,
+            )
+        )
         setpoint_controls.addWidget(self.simulated_current_value)
         layout.addWidget(self.simulated_setpoint_controls)
 
@@ -760,6 +816,28 @@ class MainWindow(QMainWindow):
             self.simulated_host = PlotlyHost(self.simulated_plot_view, self.plot_document)
         layout.addWidget(self.simulated_plot_view, stretch=1)
         self.tabs.addTab(page, "Simulated Data")
+
+    def _slider_value_editor(self, on_commit):
+        editor = QLineEdit("n/a")
+        editor.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        editor.setFixedWidth(110)
+        # Keep slider rows as short as the former labels so small windows retain plot height.
+        editor.setStyleSheet("padding: 1px 6px; min-height: 0px; color: #087f78; font-weight: 600;")
+        editor.setToolTip("Type a value and press Enter; snaps to the nearest grid point")
+        editor.editingFinished.connect(on_commit)
+        return editor
+
+    def _snap_slider_to_value(self, slider, editor, values, fmt, log=False):
+        if values is None or not len(values):
+            editor.setText("n/a")
+            return
+        grid = np.asarray(values, dtype=float)
+        match = re.match(r"\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)", editor.text())
+        target = float(match.group(1)) if match else None
+        if target is not None and (not log or target > 0):
+            distance = np.abs(np.log10(grid) - np.log10(target)) if log else np.abs(grid - target)
+            slider.setValue(int(np.nanargmin(distance)))
+        editor.setText(fmt.format(grid[slider.value()]))
 
     def _update_simulated_axes(self, changed, other):
         other.blockSignals(True)
@@ -794,25 +872,11 @@ class MainWindow(QMainWindow):
 
         self.current_artifact = Path(path)
         self.constant_current_cache.clear()
-        positive_currents = self.simulated_data.current[
-            np.isfinite(self.simulated_data.current)
-            & (self.simulated_data.current > 0)
-        ]
-        if positive_currents.size:
-            lower = np.log10(positive_currents.min())
-            upper = np.log10(positive_currents.max())
-            self.constant_current_targets = np.logspace(lower, upper, 501)
-            self.simulated_current_slider.blockSignals(True)
-            self.simulated_current_slider.setMaximum(
-                self.constant_current_targets.size - 1
-            )
-            self.simulated_current_slider.setValue(
-                self.constant_current_targets.size // 2
-            )
-            self.simulated_current_slider.blockSignals(False)
-        else:
-            self.constant_current_targets = np.array([], dtype=np.float64)
-            self.simulated_current_slider.setMaximum(0)
+        self.constant_current_targets = np.logspace(-12, -6, 601)
+        self.simulated_current_slider.blockSignals(True)
+        self.simulated_current_slider.setMaximum(self.constant_current_targets.size - 1)
+        self.simulated_current_slider.setValue(self.constant_current_targets.size // 2)
+        self.simulated_current_slider.blockSignals(False)
         self.simulated_rf_slider.blockSignals(True)
         self.simulated_rf_slider.setMaximum(
             self.simulated_data.rf_amplitude.size - 1
@@ -846,6 +910,11 @@ class MainWindow(QMainWindow):
             probability_view and self.simulated_data is not None and self.simulated_data.energy is not None
         )
         self.simulated_current_slider.setEnabled(constant_current_view)
+        color_mapped = "heatmap" in plot_type or "surface" in plot_type
+        manual_range = color_mapped and self.simulated_color_range.currentText() == "Manual"
+        self.simulated_color_range.setEnabled(color_mapped)
+        for editor in (self.simulated_color_min, self.simulated_color_max):
+            editor.setEnabled(manual_range)
         self.simulated_setpoint_controls.setVisible(constant_current_view)
         if not constant_current_view:
             self.constant_current_status.clear()
@@ -860,16 +929,21 @@ class MainWindow(QMainWindow):
         self.simulated_rf_value.setText(f"{rf_value:.4g} V")
         if self.simulated_host is None:
             return
-        if plot_type == "Constant-current dI/dV heatmap":
-            plot_values, title = self._constant_current_heatmap_data()
+        constant_quantity = "dZ/dV" if "dZ/dV" in plot_type else "dI/dV"
+        constant_label = "dZ/dV (nm/V)" if constant_quantity == "dZ/dV" else "dI/dV"
+        if constant_current_view and plot_type.endswith("heatmap"):
+            plot_values, title = self._constant_current_heatmap_data(constant_quantity)
             if plot_values is None:
                 return
-        elif plot_type == "Constant-current dI/dV trace":
-            heatmap_values, heatmap_title = self._constant_current_heatmap_data()
+        elif constant_current_view:
+            heatmap_values, heatmap_title = self._constant_current_heatmap_data(constant_quantity)
             if heatmap_values is None:
                 return
             plot_values = heatmap_values[rf_index]
-            title = f"dI/dV vs bias at constant current {self.simulated_current_value.text()}"
+            title = (
+                f"{constant_quantity} vs bias at constant current "
+                f"{self.simulated_current_value.text()}"
+            )
         else:
             if probability_view:
                 try:
@@ -932,13 +1006,13 @@ class MainWindow(QMainWindow):
                     "zaxis_title": color_label,
                 }
             )
-        elif plot_type == "Constant-current dI/dV heatmap":
+        elif constant_current_view and plot_type.endswith("heatmap"):
             figure = go.Figure(go.Heatmap(
                 z=plot_values,
                 x=data.voltage,
                 y=data.rf_amplitude,
                 colorscale="RdBu_r",
-                colorbar={"title": "dI/dV"},
+                colorbar={"title": constant_label},
             ))
             figure.update_layout(
                 xaxis_title="DC bias (V)",
@@ -954,14 +1028,41 @@ class MainWindow(QMainWindow):
             ))
             figure.update_layout(
                 xaxis_title="DC bias (V)",
-                yaxis_title="dI/dV",
+                yaxis_title=constant_label,
             )
+        if color_mapped:
+            zmin, zmax = self._simulated_color_limits(plot_values)
+            if zmin is not None:
+                if plot_type.endswith("surface"):
+                    figure.update_traces(cmin=zmin, cmax=zmax)
+                else:
+                    figure.update_traces(zmin=zmin, zmax=zmax)
         figure.update_layout(title=title)
         if grid_heatmap:
             figure.update_layout(margin={"l": 56, "r": 30, "t": 40, "b": 40})
         self._style_plot(figure)
         self.simulated_host.update(figure)
         self.simulated_plot_type = plot_type
+
+    def _simulated_color_limits(self, values):
+        """Return (zmin, zmax) for the selected color range; editors mirror the automatic range."""
+        finite = np.asarray(values, dtype=float)
+        finite = finite[np.isfinite(finite)]
+        mode = self.simulated_color_range.currentText()
+        if mode == "Manual":
+            try:
+                zmin = float(self.simulated_color_min.text())
+                zmax = float(self.simulated_color_max.text())
+            except ValueError:
+                return None, None
+            return (zmin, zmax) if zmin < zmax else (None, None)
+        if not finite.size:
+            return None, None
+        clip = {"Clip 1%": 1.0, "Clip 5%": 5.0}.get(mode, 0.0)
+        zmin, zmax = (float(limit) for limit in np.percentile(finite, [clip, 100 - clip]))
+        self.simulated_color_min.setText(f"{zmin:.4g}")
+        self.simulated_color_max.setText(f"{zmax:.4g}")
+        return (zmin, zmax) if clip and zmin < zmax else (None, None)
 
     def _simulated_transmission_data(self, rf_index):
         data = self.simulated_data
@@ -997,12 +1098,12 @@ class MainWindow(QMainWindow):
             yaxis={"automargin": True, "gridcolor": "#e3e9e9", "zerolinecolor": "#cdd8da"},
         )
 
-    def _constant_current_heatmap_data(self):
+    def _constant_current_heatmap_data(self, quantity="dI/dV"):
         if self.constant_current_targets.size == 0:
             return None, ""
         index = self.simulated_current_slider.value()
         target = float(self.constant_current_targets[index])
-        self.simulated_current_value.setText(f"{target:.3e}")
+        self.simulated_current_value.setText(f"{target:.3e} A")
         if index not in self.constant_current_cache:
             result = constant_current_slice(
                 target, self.simulated_data.z, self.current_array,
@@ -1025,9 +1126,12 @@ class MainWindow(QMainWindow):
             f"Valid constant-current cells: {valid.sum()}/{valid.size}."
             + height_status
         )
+        if quantity == "dZ/dV":
+            voltage = self.simulated_data.voltage
+            derivative_values = np.vstack([_finite_gradient(voltage, row) for row in height_values])
         return (
             derivative_values,
-            f"dI/dV at constant current {target:.3e}",
+            f"{quantity} at constant current {target:.3e}",
         )
 
     def _choose_output(self):
@@ -1065,6 +1169,8 @@ class MainWindow(QMainWindow):
             A_max=self.A_max.value(),
             phi_tip=self.phi_tip.value(),
             phi_samp=self.phi_samp.value(),
+            E_F_tip=self.E_F_tip.value(),
+            E_F_samp=self.E_F_samp.value(),
             use_lut=self.use_lut.currentData(),
             dc_table=self.dc_table.currentData(),
             out=self.output.text(),

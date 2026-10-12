@@ -134,14 +134,26 @@ def airy_all(z, z_switch=8.0):
     return out
 
 
-def _forbidden_barrier_transmission(E, V, d, W0, Ws, field):
+def _scaled_airy(eta):
+    """Return Ai, Ai', Bi, Bi' with Ai·exp(s), Bi·exp(-s) scaling, plus s = (2/3)·max(eta, 0)^(3/2)."""
+    eta = np.asarray(eta, dtype=np.float64)
+    positive = eta > 0
+    values = np.empty((4,) + eta.shape, dtype=np.float64)
+    if np.any(positive):
+        values[:, positive] = sp_airye(eta[positive])
+    if np.any(~positive):
+        values[:, ~positive] = sp_airy(eta[~positive])
+    return (*values, np.where(positive, (2.0 / 3.0) * np.maximum(eta, 0) ** 1.5, 0.0))
+
+
+def _forbidden_barrier_transmission(E, collector_energy, d, W0, Ws, field):
     """Match scaled Airy waves, with a midpoint rectangular limit at zero tilt."""
     root0 = np.sqrt(W0)
     roots = np.sqrt(Ws)
     action = (2 * a * d / 3) * (W0 + root0 * roots + Ws) / (root0 + roots)
     attenuation = np.exp(-2 * action)
     k1 = a * np.sqrt(np.maximum(E, 1e-3))
-    k3 = a * np.sqrt(np.maximum(E + V, 1e-12))
+    k3 = a * np.sqrt(np.maximum(collector_energy, 1e-12))
     result = np.empty_like(E)
     rectangular = np.abs(W0 - Ws) <= 1e-6 * np.maximum(W0, Ws)
 
@@ -184,15 +196,20 @@ def _forbidden_barrier_transmission(E, V, d, W0, Ws, field):
 
 
 def transmission(E, V, d, phi_t, phi_s,
-                 F1=F_SWITCH, z_switch=8.0, fudge=3.69, F_blend=F_BLEND,
-                 *, approximation="hybrid"):
+                 F1=F_SWITCH, z_switch=8.0, wkb_prefactor=3.69, F_blend=F_BLEND,
+                 *, approximation="hybrid", fermi_tip=E_F, fermi_samp=None):
     """
     Transmission probability through a trapezoidal vacuum barrier.
+
+    E is measured from the emitting electrode's band bottom: the tip for V >= 0 and
+    the sample for V < 0. Fermi levels align at zero bias, so the barrier depends on
+    the emitter's Fermi energy and the collector's band bottom sits at
+    E_F(emitter) - |V| - E_F(collector). fermi_samp defaults to fermi_tip.
 
     Works for any broadcast-compatible mix of scalars/arrays in E, V, d.
     The default uses scaled Airy matching below the barrier, not a calibrated
     WKB/Airy switch. F1 and F_blend remain accepted for caller compatibility;
-    fudge applies only to the explicit WKB approximation.
+    wkb_prefactor applies only to the explicit WKB approximation.
     """
 
     # 1) broadcast all inputs to common shape
@@ -211,11 +228,15 @@ def transmission(E, V, d, phi_t, phi_s,
     V_eff  = np.abs(V)
     phi1   = np.where(swap, phi_s, phi_t)
     phi2   = np.where(swap, phi_t, phi_s)
+    fermi_samp = fermi_tip if fermi_samp is None else fermi_samp
+    fermi_emitter   = np.where(swap, fermi_samp, fermi_tip)
+    fermi_collector = np.where(swap, fermi_tip, fermi_samp)
     # (optional image-charge term would be added here)
 
     # 3) barrier tops and electric field
-    W0         = phi1 + E_F - E
-    Ws_minus_V = phi2 + E_F - E - V_eff
+    W0         = phi1 + fermi_emitter - E
+    Ws_minus_V = phi2 + fermi_emitter - E - V_eff
+    collector_energy = E + V_eff - fermi_emitter + fermi_collector
     F_s        = (V_eff + (phi1 - phi2)) / d
 
     T_wkb = np.zeros_like(E, dtype=np.float64)
@@ -234,11 +255,11 @@ def transmission(E, V, d, phi_t, phi_s,
         logT = -(4 * a * d[m_wkb] / 3) * (
             (W0w + root0 * roots + Wsw) / (root0 + roots)
         )
-        T_wkb[m_wkb] = fudge * np.exp(logT)
+        T_wkb[m_wkb] = wkb_prefactor * np.exp(logT)
 
     if approximation != "wkb" and np.any(wkb_valid):
         T_air[wkb_valid] = _forbidden_barrier_transmission(
-            E[wkb_valid], V_eff[wkb_valid], d[wkb_valid],
+            E[wkb_valid], collector_energy[wkb_valid], d[wkb_valid],
             W0[wkb_valid], Ws_minus_V[wkb_valid], F_s[wkb_valid],
         )
 
@@ -250,57 +271,62 @@ def transmission(E, V, d, phi_t, phi_s,
         zs  = factor * Ws_minus_V[m_air]
         zp  = np.sign(F_air) * (a**2 * np.abs(F_air))**(1/3)
 
-        Ai0, Aip0, Bi0, Bip0 = airy_all(z0, z_switch=z_switch)
-        Ais, Aips, Bis, Bips = airy_all(zs, z_switch=z_switch)
+        # Exact scaled Airy values; truncated asymptotics past |eta| > 8 made ln T(V) jagged.
+        Ai0, Aip0, Bi0, Bip0, s0 = _scaled_airy(z0)
+        Ais, Aips, Bis, Bips, ss = _scaled_airy(zs)
+        delta = s0 - ss
+        forward = np.exp(-delta - np.abs(delta))
+        backward = np.exp(delta - np.abs(delta))
 
         E_a = E[m_air]
-        V_a = V_eff[m_air]
         k1  = a * np.sqrt(np.maximum(E_a, 1e-3))
-        k3  = a * np.sqrt(np.maximum(E_a + V_a, 1e-12))
+        k3  = a * np.sqrt(np.maximum(collector_energy[m_air], 1e-12))
         num = (k3 / k1) * (4 / np.pi**2)
 
-        t1 = Aip0*Bips - Aips*Bip0
-        t2 = Ai0*Bis   - Ais*Bi0
-        t3 = Ais*Bip0  - Aip0*Bis
-        t4 = Ai0*Bips  - Aips*Bi0
+        t1 = Aip0*Bips*forward - Aips*Bip0*backward
+        t2 = Ai0*Bis*forward   - Ais*Bi0*backward
+        t3 = Ais*Bip0*backward - Aip0*Bis*forward
+        t4 = Ai0*Bips*forward  - Aips*Bi0*backward
 
         denom = ((zp/k1)*t1 + (k3/zp)*t2)**2 + ((k3/k1)*t3 + t4)**2
         denom = np.where(np.abs(denom) < 1e-12, np.inf, denom)
 
-        T_air[m_air] = num / denom
+        T_air[m_air] = num * np.exp(-2 * np.abs(delta)) / denom
 
-    return np.clip(T_wkb if approximation == "wkb" else T_air, 0.0, 1.0)
+    clipped = np.clip(T_wkb if approximation == "wkb" else T_air, 0.0, 1.0)
+    return np.where(collector_energy > 0, clipped, 0.0)  # no propagating collector states
 
 
-def transmission_wkb(E, V, d, phi_t, phi_s, *, fudge=1.0, z_switch=8.0):
+def transmission_wkb(E, V, d, phi_t, phi_s, *, wkb_prefactor=1.0, z_switch=8.0,
+                     fermi_tip=E_F, fermi_samp=None):
     """Evaluate WKB explicitly, independent of hybrid transition masks."""
-    return transmission(E, V, d, phi_t, phi_s, fudge=fudge,
-                        z_switch=z_switch, approximation="wkb")
+    return transmission(E, V, d, phi_t, phi_s, wkb_prefactor=wkb_prefactor, z_switch=z_switch,
+                        approximation="wkb", fermi_tip=fermi_tip, fermi_samp=fermi_samp)
 
 
-def transmission_airy(E, V, d, phi_t, phi_s, *, z_switch=8.0):
+def transmission_airy(E, V, d, phi_t, phi_s, *, z_switch=8.0, fermi_tip=E_F, fermi_samp=None):
     """Evaluate Airy matching, including the analytic zero-field limit."""
-    return transmission(E, V, d, phi_t, phi_s, fudge=1.0,
-                        z_switch=z_switch, approximation="airy")
+    return transmission(E, V, d, phi_t, phi_s, wkb_prefactor=1.0, z_switch=z_switch,
+                        approximation="airy", fermi_tip=fermi_tip, fermi_samp=fermi_samp)
 
 
-def calibrate_fudge(phi_t, phi_s, F1,
-                    D_min, D_max, n_D=20,
-                    n_E=200,    E_min=0.01,
-                    z_switch=8.0):
+def fit_wkb_prefactor(phi_t, phi_s, F1,
+                      D_min, D_max, n_D=20,
+                      n_E=200,    E_min=0.01,
+                      z_switch=8.0, fermi_tip=E_F, fermi_samp=None):
     """
-    Vectorized calibration of the Simmons‐WKB 'fudge' factor so that
-      fudge * T_WKB(E)  ≈  T_Airy(E)
-    at F=F1, over n_V sample voltages.
+    Fit the WKB prefactor so that
+      prefactor * T_WKB(E)  ≈  T_Airy(E)
+    at F=F1, over n_D sample distances. A standalone WKB-versus-Airy comparison
+    tool; the simulation does not use or record it.
 
     Returns
     -------
     f_avg : float
-      The average fudge factor across all valid samples.
+      The average prefactor across all valid samples.
     f_i   : ndarray, shape (M,)
-      The per-voltage fitted fudge factors.
+      The per-distance fitted prefactors.
     """
-    print('Calibrating fudge factor')
     if not 0 < D_min < D_max:
         raise ValueError("Calibration distances must satisfy 0 < D_min < D_max")
 
@@ -315,7 +341,8 @@ def calibrate_fudge(phi_t, phi_s, F1,
     M = Vs.size
 
     # 2) build energy grid
-    Es = np.linspace(E_min, E_F - 1e-8, n_E)
+    fermi_samp = fermi_tip if fermi_samp is None else fermi_samp
+    Es = np.linspace(E_min, min(fermi_tip, fermi_samp) - 1e-8, n_E)
 
     # 3) broadcast into M × n_E arrays
     V_grid = Vs[:, None]          # shape (M,1)
@@ -328,15 +355,18 @@ def calibrate_fudge(phi_t, phi_s, F1,
     D_grid = np.broadcast_to(D_grid, (M, n_E))
 
     # 4) call your transmission() twice
-    #    a) WKB‐only  (fudge=1, cutoff=F1)
-    T_wkb = transmission_wkb(E_grid, V_grid, D_grid, phi_t, phi_s, z_switch=z_switch)
+    #    a) WKB‐only  (prefactor=1, cutoff=F1)
+    T_wkb = transmission_wkb(E_grid, V_grid, D_grid, phi_t, phi_s, z_switch=z_switch,
+                             fermi_tip=fermi_tip, fermi_samp=fermi_samp)
 
-    #    b) Airy‐only (fudge=1, cutoff=0 → forces Airy everywhere)
-    T_airy = transmission_airy(E_grid, V_grid, D_grid, phi_t, phi_s, z_switch=z_switch)
+    #    b) Airy‐only (prefactor=1, cutoff=0 → forces Airy everywhere)
+    T_airy = transmission_airy(E_grid, V_grid, D_grid, phi_t, phi_s, z_switch=z_switch,
+                               fermi_tip=fermi_tip, fermi_samp=fermi_samp)
 
     # 5) build mask for energies where WKB would have applied
-    W0 = np.where(V_grid < 0, phi_s, phi_t) + E_F - E_grid
-    Ws = np.where(V_grid < 0, phi_t, phi_s) + E_F - E_grid - np.abs(V_grid)
+    fermi_emitter = np.where(V_grid < 0, fermi_samp, fermi_tip)
+    W0 = np.where(V_grid < 0, phi_s, phi_t) + fermi_emitter - E_grid
+    Ws = np.where(V_grid < 0, phi_t, phi_s) + fermi_emitter - E_grid - np.abs(V_grid)
     valid = (W0 > 0) & (Ws > 0)
 
     # 6) compute per-sample numerator and denominator
@@ -355,7 +385,7 @@ def calibrate_fudge(phi_t, phi_s, F1,
 
     samples = f_i[good & np.isfinite(f_i) & (f_i > 0)]
     if samples.size == 0:
-        raise ValueError("Fudge calibration produced no valid samples")
+        raise ValueError("WKB prefactor fit produced no valid samples")
     f_avg = float(np.mean(samples))
 
     return f_avg, samples

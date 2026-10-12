@@ -36,7 +36,7 @@ def test_unique_atomic_artifacts_and_lut_reuse(tmp_path):
         old_model = {**spec, "model_version": "trapezoidal-hybrid-2"}
         assert not lut_matches(file, old_model)
         assert numerical_identity(old_model) != file.attrs["lut_identity"]
-        spec["fudge_factor"] *= 1.00001
+        spec["phi_tip"] *= 1.00001
         assert not lut_matches(file, spec)
     assert not list(tmp_path.glob("*.tmp"))
 
@@ -123,10 +123,9 @@ def test_zero_rf_lut_has_no_contact_potential_peak():
     heights = np.array([0.3, 0.5])
     amplitudes = np.array([0.0])
     nodes = cosine_nodes(5)
-    fudge = 3.7396834774199776
-    lut = build_lut(energy, voltage, heights, 4.0, 5.0, fudge=fudge, n_jobs=1)
+    lut = build_lut(energy, voltage, heights, 4.0, 5.0, n_jobs=1)
     interpolator = interp_lut(lut, energy, voltage, heights)
-    direct = direct_rf_current_grid(energy, voltage, amplitudes, 0.3, 4.0, 5.0, fudge, nodes)
+    direct = direct_rf_current_grid(energy, voltage, amplitudes, 0.3, 4.0, 5.0, nodes)
     interpolated = lut_rf_current_grid(interpolator, energy, voltage, amplitudes, 0.3, nodes)
 
     assert np.all(np.diff(interpolated[:, 0]) > 0)
