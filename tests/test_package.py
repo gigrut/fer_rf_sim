@@ -35,7 +35,7 @@ def test_installed_commands_outside_repo(tmp_path, command):
 def test_example_imports_do_not_plot_or_write(tmp_path):
     root = Path(__file__).resolve().parents[1]
     code = (f"import sys; sys.path.insert(0, {str(root)!r}); "
-            "import Energy_level_diagram, figure_helper; "
+            "import figure_helper; "
             "assert 'matplotlib' not in sys.modules; assert 'plotly' not in sys.modules")
     result = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

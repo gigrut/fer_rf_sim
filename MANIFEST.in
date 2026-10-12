@@ -1,7 +1,7 @@
 include README_WORKFLOW.md LUT_MANAGEMENT.md TRANSMISSION_PLOTTING_EFFICIENCY.md
 include fer_config.yaml requirements.txt test_math_fixes.py
 include benchmark_lut_vs_direct.py profile_simulation.py
-include Energy_level_diagram.py figure_helper.py
+include figure_helper.py
 include FER_spectrum_plotter.py FER_real_data_plotter.py FER_dZdV_peak_analysis.py FER_peak_index_analysis.py
 include Ag111*.py
 recursive-include tests *.py
