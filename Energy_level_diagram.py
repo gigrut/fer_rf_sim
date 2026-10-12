@@ -8,10 +8,6 @@
 # • No specific colors are set; uses matplotlib defaults so you can restyle globally later.
 # • You can later add Fermi-level lines, bias tilt, band edges, work functions, etc.
 
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
-import matplotlib as mpl
-
 def draw_stm_energy_diagram(
     tip_height=4.0,        # "height" of the rectangle in arbitrary energy units
     sample_height=4.0,
@@ -25,6 +21,8 @@ def draw_stm_energy_diagram(
     fig_size=(6,4),        # figure size in inches
     lw=2.0,                # line width for rectangle edges
 ):
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
     # Derived positions (left edges)
     tip_x0 = 0.0
     gap_x0 = tip_x0 + tip_width
@@ -77,6 +75,9 @@ def draw_stm_energy_diagram(
 
     return svg_path, png_path
 
-svg_path, png_path = draw_stm_energy_diagram()
+def main():
+    draw_stm_energy_diagram()
 
-svg_path, png_path
+
+if __name__ == "__main__":
+    main()

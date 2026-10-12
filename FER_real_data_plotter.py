@@ -9,10 +9,15 @@ from scipy.special import lambertw
 from scipy.optimize import curve_fit, least_squares, brentq
 
 # --- 1) Load only needed columns ---
-from fer_sim_config import REAL_DATA_CSV_PATH, REAL_DATA_SETPOINT, REAL_DATA_PEAK_NUMBER
-csv_path = Path(REAL_DATA_CSV_PATH)
+from fer_sim_config import (REAL_DATA_FITTED_PEAKS_PATH, REAL_DATA_SETPOINT,
+                            REAL_DATA_PEAK_NUMBER, REAL_DATA_BASELINE_FILES)
+from fer_rf_sim.csv_data import load_fitted_peaks, explicit_baseline_mask
+from fer_rf_sim.units import dbm_to_peak_volts
+if REAL_DATA_FITTED_PEAKS_PATH is None:
+    raise ValueError("Set real_data.fitted_peaks_csv_path or FER_FITTED_PEAKS_CSV to a fitted-peak CSV")
+csv_path = Path(REAL_DATA_FITTED_PEAKS_PATH)
 setpoint = REAL_DATA_SETPOINT
-peak_number = 1 # 1-indexed  
+peak_number = REAL_DATA_PEAK_NUMBER
 
 peak_number = peak_number - 1 # to be 0-indexed  
 
@@ -21,12 +26,8 @@ usecols = [
     "FitPeakCenter", "FitPeakWidth", "FitPeakCenterUncertainty", "FitPeakHeight",
 ]
 
-df = pd.read_csv(
-    csv_path,
-    usecols=usecols,
-    index_col=None,       # set to 0 if the first CSV column is a saved index you want to drop
-    low_memory=False,
-)
+df = load_fitted_peaks(csv_path)
+df["IsBaseline"] = explicit_baseline_mask(df, REAL_DATA_BASELINE_FILES)
 
 # --- 2) Clean types ---
 for c in usecols:
@@ -35,8 +36,7 @@ for c in usecols:
 
 # --- 3) Convert RF Power (dBm) -> amplitude (V) with R=50Ω ---
 # P(W) = 10^((dBm - 30)/10)
-P_W = 10.0 ** ((df["RF Power"] - 30.0) / 10.0)
-df["RF Amplitude (V)"] = np.sqrt(2.0 * P_W * 50.0)
+df["RF Amplitude (V)"] = dbm_to_peak_volts(df["RF Power"], impedance=50.)
 
 # --- 4) Filter: Setpoint==1000 and PeakNumber==0 ---
 mask = (df["Setpoint"] == setpoint) & (df["PeakNumber"] == peak_number)
@@ -48,8 +48,8 @@ df0 = df0.sort_values(["Setpoint", "RF Power", "FileName"])  # Sort to ensure co
 
 # Create a baseline lookup: for each (Setpoint, RF Power), use the first file's FitPeakCenter
 baseline_lookup = (
-    df0.groupby(["Setpoint", "RF Power"])["FitPeakCenter"]
-    .first()  # First file = RF off baseline
+    df0.loc[df0["IsBaseline"]].groupby(["Setpoint", "RF Power"])["FitPeakCenter"]
+    .first()
     .reset_index()
     .rename(columns={"FitPeakCenter": "BaselineCenter"})
 )
@@ -64,11 +64,13 @@ print(f"Created {len(baseline_lookup)} baselines")
 
 # --- 6) Filter out RF off data (baseline measurements) for plotting ---
 # Get the baseline files (first file for each RF Power)
-baseline_files = df0.groupby(["RF Power"])["FileName"].first().reset_index()
+baseline_files = df0.loc[df0["IsBaseline"], ["RF Power", "FileName"]].drop_duplicates()
 baseline_filenames = set(baseline_files["FileName"])
 
 # Keep only RF on data (non-baseline files) for plotting
-df0_plot = df0[~df0["FileName"].isin(baseline_filenames)].copy()
+df0_plot = df0[~df0["IsBaseline"]].copy()
+if df0_plot["BaselineCenter"].isna().any():
+    raise ValueError("Every fitted-peak group requires an explicit RF-off baseline")
 
 # Drop rows with missing essentials
 df0_plot = df0_plot.dropna(subset=["RF Amplitude (V)", "FitPeakHeight", "FitPeakWidth"])

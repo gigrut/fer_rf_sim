@@ -67,5 +67,8 @@ coverage.xml
 Thumbs.db
 
 # Project specific
+.ruff_cache/
 fer_output/*.h5
 profile_output.prof
+countdown/
+/*.png

@@ -19,71 +19,10 @@ dI_dV_col_name = 'dI/dV'  # Column name for dI/dV data
 df = pd.read_csv(file_path)
 
 
-def dbm_to_mw(dBm):
-        mW = 10**(dBm/10)
-        return mW
-def dbm_to_mv(dBm):
-    """Convert dBm to mV peak amplitude assuming 50 ohm impedance
-    P(mW) = 10^(dBm/10)
-    V_rms = sqrt(P(mW) * R(ohm) * 1e-3) where R=50 ohm
-    V_peak = V_rms * sqrt(2)
-    """
-    mW = dbm_to_mw(dBm)
-    # V_rms = sqrt(P * R) where P is in Watts and R = 50 ohms
-    V_rms_volts = (mW * 1e-3 * 50)**0.5  # RMS voltage in volts
-    # Convert RMS to peak amplitude
-    V_peak_volts = V_rms_volts * (2**0.5)  # Peak = RMS * sqrt(2)
-    mV_peak = V_peak_volts * 1000  # Convert V to mV
-    return mV_peak
-def CGQ(func, V_DC, V_RF, n=100):
-    """Interpret func as I(V), V_DC as the DC bias, V_RF as the RF amplitude, and n as the number of terms in the series.
-    This can handles V_DC as a vector (pandas Series or NumPy array)"""
-    i = np.array(range(1,n+1))
-    x = np.cos(np.pi*(2*i-1)/(2*n))
-    V_DC = np.asarray(V_DC)  # Convert V_DC to array if it's not already to ensure compatibility with broadcasting
-    arg = V_DC[:, None] + V_RF * x  # Broadcasting happens here
-    return np.sum(func(arg), axis=1) / n if V_DC.ndim > 0 else np.sum(func(arg)) / n
-def broadenCGQ(spec, x_axis_name, y_axis_name, V_RF, n):
-    """This is the function that does all the heavy lifting.
-    It uses Chebeshev-Gauss quadrature (CGQ) to compute RF broadening
-    params:
-    spec: a pandas dataframe representing a point spectrum.  It can be any size.
-    x_axis_name, y_axis_name: strings that correspond to the names of the two columns involved in the broadening
-        the x-axis is something like 'bias' and the y-axis is something like 'di/dv'
-    V_RF: a float that represents the amplitude of the broadening.  It can have any units, but should match the units of the x-axis
-    n: an integer that tells the functions how many terms to use in the series approximation of the integral
-        n=100 seems to be plenty accurate and fast enough.
-    Returns a column corresponding to spec[y_axis_name] but broadened"""
-    if type(V_RF) == np.ndarray:
-        V_RF = V_RF.item()  
-    
-    # Remove duplicates and sort for interpolation
-    df_sorted = spec.sort_values(x_axis_name).drop_duplicates(subset=[x_axis_name])
-    
-    # Use cubic interpolation if we have enough points, otherwise fall back to linear
-    try:
-        if len(df_sorted) >= 4:  # Need at least 4 points for cubic
-            interp_func = interp1d(df_sorted[x_axis_name], df_sorted[y_axis_name], kind='cubic', 
-                                  bounds_error=False, fill_value=0.0)
-        else:
-            interp_func = interp1d(df_sorted[x_axis_name], df_sorted[y_axis_name], kind='linear', 
-                                  bounds_error=False, fill_value=0.0)
-    except ValueError:
-        # Fall back to linear if cubic fails
-        interp_func = interp1d(df_sorted[x_axis_name], df_sorted[y_axis_name], kind='linear', 
-                              bounds_error=False, fill_value=0.0)
-    df = spec.copy()
-    x_min = df[x_axis_name].min()
-    x_max = df[x_axis_name].max()
-    
-    # More conservative masking - only mask points very close to the edges
-    # This reduces NaN artifacts while still avoiding edge effects
-    edge_buffer = V_RF * 1.5  # Only mask if within 1.5*V_RF of edges
-    mask = (df[x_axis_name] - x_min < edge_buffer) | (x_max - df[x_axis_name] < edge_buffer)
-    
-    # Apply the CGQ function where the mask is False, and np.nan where True
-    broadened_col = np.where(mask, np.nan, CGQ(interp_func, df[x_axis_name], V_RF, n))
-    return broadened_col
+from fer_rf_sim.units import dbm_to_mw
+from fer_rf_sim.units import dbm_to_mv
+from fer_rf_sim.quadrature import CGQ
+from fer_rf_sim.broadening import broadenCGQ
 def rms_error(params, spec1, spec2, x_axis_name, y_axis_name, n=100):
     """Returns the rms error between spec1 (assumed RF on), and a broadened version of spec2 (assumed RF off)."""
     if len(params) == 1:

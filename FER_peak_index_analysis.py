@@ -21,36 +21,9 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, module="scipy", messa
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="scipy", message="invalid value encountered in multiply")
 warnings.simplefilter(action='ignore', category=RuntimeWarning)
 
-def dbm_to_mw(dBm):
-    mW = 10**(dBm/10)
-    return mW
-def dbm_to_mv(dBm):
-    mV = 2*2**0.5 * (50/1000)**(0.5) * (10**(dBm/20))
-    return mV
-def broadenCGQ(channel, bias, v_rf, n):
-    """channel is the thing to be broadened"""
-    # n is going to be the number of points in the convolution
-    if type(v_rf) == np.ndarray:
-        v_rf = v_rf.item()
-    #Step 1: Account for uneven spacing
-    regular_bias = np.linspace(min(bias), max(bias), len(bias))
-    bias_step = regular_bias[1] - regular_bias[0]
-    invalid_pts = int(v_rf // bias_step) # might be off by 1
-    truncated_bias = regular_bias[invalid_pts:-invalid_pts] # might be off by 1
-    samples = np.array(range(1,n+1))
-    interp_function = interp1d(bias, channel, kind='linear', fill_value='extrapolate')
-    broadened_data = np.zeros(len(bias)-2*invalid_pts)
-    for i,v in enumerate(truncated_bias):
-        num = np.cos(np.pi*(2*samples-1)/(2*n))
-        x = v_rf * num + v
-        broadened_data[i] = np.sum(interp_function(x)/n)
-    M = len(bias) - len(broadened_data)
-    pad1 = pad2 = M // 2
-    if M % 2 != 0:
-        pad2 += 1
-    padded = np.pad(broadened_data, (pad1, pad2), 'constant', constant_values=(np.nan, np.nan))
-    conv_result  = pd.DataFrame({'bias': regular_bias, 'broadened channel': padded})
-    return conv_result
+from fer_rf_sim.units import dbm_to_mw
+from fer_rf_sim.units import dbm_to_mv
+from fer_rf_sim.broadening import broaden_index_spectrum as broadenCGQ
 def round_to_1sf(x):
     if x<=0:
         return x
@@ -98,34 +71,29 @@ polyorder = 4       # The order of the polynomial used to fit the samples
 prominence = 25
 distance = 10
 
-folder_path = "C:/Users/willh/OneDrive/Desktop/Data/z_dependent_fer_shift_csv"
+from pathlib import Path
+import yaml
+from fer_sim_config import REAL_DATA_CSV_PATH
+from fer_rf_sim.real_data import RealDataRepository
+folder_path = REAL_DATA_CSV_PATH
 read = 1
 if read:
-    file_list = os.listdir(folder_path)
-    dfs = []
-    file_names = []
-    for file in file_list:
-        if file.endswith('.csv'):
-            file_path = os.path.join(folder_path, file)
-            df = pd.read_csv(file_path)
-            dfs.append(df)
-            file_names.append(file_path[-17:])
-    # Powers (in dBm) = ['off', 10, 15, 17.5, 20]
-    # Z shift for each power:
-    zs = [0, 0.0035, 0.01, 0.016, 0.027]
-    #zs = [0,.056,.18,.427,.747]
-    # No attenuation
-    #vrfs = [0, 1, 1.7783, 2.37135, 3.1623]
-    # 5dB attenuation
-    vrfs = [0, 0.56, 1, 1.33, 1.78] 
-    # 10 dB attenuation
-    #vrfs = [0, 0.32, 0.56, 0.75, 1]
+    mapping_path = os.environ.get("FER_PEAK_INDEX_MAPPING")
+    if not mapping_path:
+        raise ValueError("Set FER_PEAK_INDEX_MAPPING to an explicit filename calibration YAML")
+    calibration = yaml.safe_load(Path(mapping_path).read_text(encoding="utf-8"))
+    rf_mapping = {name: values["rf_peak_v"] for name, values in calibration.items() if "rf_peak_v" in values}
+    spectra = RealDataRepository().load(folder_path, rf_mapping=rf_mapping)
+    dfs = [spectrum.data for spectrum in spectra]
+    file_names = [spectrum.path.name for spectrum in spectra]
+    frames_by_name = dict(zip(file_names, dfs))
     peak_data = []
-    j=0
     for i,df in enumerate(dfs):
-        df['RF (V)'] = vrfs[j]
-        drift_correction = df['z-topo (nm)'].iloc[185] - dfs[i%5]['z-topo (nm)'].iloc[275] + (i%5)*0.2/4
-        df['tip-sample-distance (nm)'] = 5.2 + zs[j] + df['z-topo (nm)'] - drift_correction
+        entry = calibration[file_names[i]]
+        df['RF (V)'] = spectra[i].require_rf()
+        reference = frames_by_name[entry['drift_reference']]
+        drift_correction = df['z-topo (nm)'].iloc[185] - reference['z-topo (nm)'].iloc[275] + entry['drift_offset_nm']
+        df['tip-sample-distance (nm)'] = 5.2 + entry['z_shift_nm'] + df['z-topo (nm)'] - drift_correction
         # Apply Savitzky-Golay filter to the 'lockin-x (mV)' column
         df['smoothed'] = savgol_filter(df['lockin-x (mV)'], window_length, polyorder)
         # Filter
@@ -147,8 +115,6 @@ if read:
         ] 
         peak_data.append(peak_info)
         # peak_data is a list of lists. Each sublist corresponds to a spectrum. The elements of the sublist are dictionaries. Each dictionary contains information about a peak in that spectrum.
-        if i%5==4:
-            j+=1
             
     print('finished reading files')
 

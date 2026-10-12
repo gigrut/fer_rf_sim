@@ -1,204 +1,89 @@
-# FER Simulation Workflow
+# FER Workflow
 
-This project simulates Field Emission Resonance (FER) tunneling with RF modulation. The workflow has been refactored for easier use and faster feedback.
+Install the package with plotting extras as described in [README](README.md).
+Root scripts remain compatibility adapters; the examples use installed commands.
 
-## Quick Start
+## Run And Reuse An Artifact
 
-### 1. Run Complete Workflow
-```bash
-# Run everything with default settings (recommended)
-python run_workflow.py
-
-# Quick test with smaller grids
-python run_workflow.py --quick-test
-
-# Skip LUT for more accurate (but slower) calculation
-python run_workflow.py --no-lut
+```powershell
+fer-sim workflow --quick-test --threads 1
+fer-sim workflow --quick-test --use-lut --threads 1
+fer-sim workflow --skip-simulation --h5-path path/to/result.h5 --steps quick-check constant-current
 ```
 
-### 2. Step-by-Step Workflow
+Simulation runs in-process through `SimulationRunner` and returns a `Path`.
+Every subsequent step receives that exact path. When skipping simulation,
+`--h5-path` selects an artifact explicitly; otherwise the newest parameterized
+artifact in `--out` is resolved once (with `current.h5` as a legacy fallback).
+Analysis subprocesses use the active interpreter and installed modules, not a
+literal `python` command or working-directory-dependent scripts. Downstream
+failures produce a nonzero workflow exit status.
+`--no-show` builds and validates the analysis figures without opening a browser;
+it is also accepted by `check` and `constant-current`. Plotting extras are still
+required for figure construction.
 
-#### Step 1: Run Simulation
-```bash
-# Basic simulation with LUT (fast)
-python FER_constant_current_simulation.py --use-lut
+The quick preset uses 50 energy, 20 bias, 5 height and 3 RF samples unless an
+explicit grid-count option overrides it. For a smaller
+headless check without plotting, use explicit counts:
 
-# Quick test with smaller grids
-python FER_constant_current_simulation.py --use-lut --n_E 50 --n_V 20 --n_Z 5 --n_A 3
+```powershell
+fer-sim workflow --steps simulation --n_E 16 --n_V 4 --n_Z 2 --n_A 2 --n_cheb 4 --threads 1 --out temporary-results
 ```
 
-#### Step 2: Quick Validation
-```bash
-# Run all quick analysis plots
-python quick_check.py
+All simulation options use the shared config loader. Built-ins are 100/100/100/30
+samples for energy/bias/height/RF, 32 RF phase nodes, and direct calculation.
+The repository YAML overrides some of these values. Use `--no-lut` for an explicit
+false override, even when YAML enables LUTs. Grid counts and ranges are validated
+before work starts. Avoid using the full default grid as a smoke test.
 
-# Specific plots
-python quick_check.py --plot-type current
-python quick_check.py --plot-type dlog
-python quick_check.py --plot-type profiles
+## Analyze
+
+```powershell
+fer-sim check --h5-path path/to/result.h5 --plot-type current
+fer-sim check --h5-path path/to/result.h5 --plot-type dlog
+fer-sim constant-current --h5-path path/to/result.h5 --I-target 1e-9 --a-val 0
+fer-sim constant-current --h5-path path/to/result.h5 --multiple 1e-10 1e-9 --a-idx 0
 ```
 
-#### Step 3: Constant Current Analysis
-```bash
-# Analyze constant current (auto-detects reasonable current level)
-python constant_current_analysis.py --I-target 1e-9
+`--I-target` and `--multiple` are alternatives. Multiple-current comparisons
+default to the lowest available RF amplitude if none is selected. In workflow
+mode only, an omitted target is estimated from the finite positive currents;
+this is not a guarantee that every voltage/RF trace reaches that setpoint.
 
-# Compare multiple current levels
-python constant_current_analysis.py --multiple 1e-10 1e-9 1e-8
-```
+The analysis computes the fixed-height derivative `dI/dV` on the artifact grid,
+then interpolates that derivative at the inverted constant-current height. It
+does **not** compute a total derivative along the constant-current contour.
+Unreachable, nonmonotonic, flat, or nonfinite traces yield NaNs, not extrapolated
+heights. Invalid axes and nonfinite target values are errors. Derivatives are
+reused across multi-current analysis and cached once per artifact in the GUI.
 
-#### Step 4: Advanced Plotting
-```bash
-# Interactive 3D plots
-python FER_plotter.py
+All current values and derivatives remain in normalized model units. A target
+such as `1e-9` must not be interpreted as one nanoampere.
 
-# Advanced post-processing (may need fixes)
-python FER_sim_post_processing.py
-```
+## Desktop
 
-## Script Descriptions
+`fer-gui` provides simulated/real-data views, shared peak extraction, and RF
+peak-dependence analysis. It uses shared config and analysis, preserves untouched YAML values, and
+bounds the setpoint cache to 16 entries. Selecting an artifact invalidates that
+cache. Plotly views share one local HTML document and update in place. Closing
+during a run waits for completion; it does not terminate numerical workers.
+Temporary HTML is removed on close. Without Qt WebEngine, the window retains its
+fallback labels, extraction tables and CSV export rather than requiring a browser component.
 
-### Core Scripts
+Choose a source in Peak Extraction, select the simulated signal and current
+target or height when applicable, and extract peaks. RF Dependence uses those
+same measurements, excluding spectra with unknown RF metadata. Real RF
+assignments made with Set RF are session-only. RF matching uses a configurable
+maximum bias shift; peak shifts use the lowest observed RF per track as the
+reference. Changing extraction settings or loading a source invalidates both
+analyses. See [peak workflow](README.md#peak-extraction-and-rf-dependence) for
+units, matching limitations, and replicate handling.
 
-- **`FER_constant_current_simulation.py`**: Main simulation engine
-  - Calculates transmission coefficients for different barrier geometries
-  - Computes tunneling current by integrating over electron energy
-  - Optional LUT for speed optimization
+## Artifacts
 
-- **`quick_check.py`**: Fast validation and basic plots
-  - Current vs (Z, V) heatmaps
-  - d(log(I))/dV vs (Z, V) heatmaps  
-  - Current profiles vs voltage
-  - Fast feedback on simulation results
-
-- **`constant_current_analysis.py`**: Post-processing for constant current
-  - Finds tip height Z(V) that gives constant current
-  - Calculates dI/dV vs V at constant current
-  - Supports multiple current levels
-
-- **`run_workflow.py`**: Complete workflow automation
-  - Runs all steps in sequence
-  - Configurable for different use cases
-  - Error handling and progress reporting
-
-### Advanced Scripts
-
-- **`FER_plotter.py`**: Interactive 3D plotting and transmission analysis
-- **`FER_sim_post_processing.py`**: Advanced post-processing (needs fixes)
-
-## Key Features
-
-### 1. Transmission Coefficient Calculation
-- Two-regime transmission: Simmons-WKB for low fields, Airy-based for high fields
-- Handles different tip/sample work functions
-- Vectorized for efficiency
-
-### 2. Current Calculation
-- Integrates transmission over electron energy
-- RF-averaged current calculation
-- Supports constant current analysis
-
-### 3. Constant Current Analysis
-- Finds Z(V) that gives constant current I_target
-- Calculates dI/dV vs V at constant current
-- Essential for experimental comparison
-
-### 4. Fast Feedback
-- Quick validation plots for immediate feedback
-- LUT system for speed optimization
-- Modular design for easy testing
-
-## Usage Examples
-
-### Quick Test Run
-```bash
-# Run quick test with small grids
-python run_workflow.py --quick-test
-
-# Check results immediately
-python quick_check.py
-```
-
-### Production Run
-```bash
-# Full simulation with LUT
-python run_workflow.py
-
-# Analyze specific current level
-python constant_current_analysis.py --I-target 1e-9 --a-val 2.0
-```
-
-### Custom Analysis
-```bash
-# Skip simulation, use existing results
-python run_workflow.py --skip-simulation --steps quick-check constant-current
-
-# Multiple current levels
-python constant_current_analysis.py --multiple 1e-10 1e-9 1e-8 1e-7
-```
-
-## Configuration
-
-### Simulation Parameters
-- `--n_E`: Energy grid points (default: 100)
-- `--n_V`: Voltage grid points (default: 100)  
-- `--n_Z`: Tip height grid points (default: 10)
-- `--n_A`: RF amplitude grid points (default: 10)
-- `--use-lut`: Use lookup table for speed
-- `--phi_tip`, `--phi_samp`: Work functions
-
-### Quick Check Options
-- `--plot-type`: Type of plot (current, dlog, profiles, all)
-- `--a-val`: RF amplitude to analyze
-
-### Constant Current Options
-- `--I-target`: Target current level
-- `--a-val`: RF amplitude to analyze
-- `--multiple`: Multiple current levels
-
-## Output Files
-
-- `fer_output/current.h5`: Main simulation results
-- `fer_output/transmission_lut_*.h5`: Lookup tables (if using LUT)
-
-## Troubleshooting
-
-### Common Issues
-
-1. **"No module named pandas"**
-   ```bash
-   pip install pandas
-   ```
-
-2. **Simulation takes too long**
-   ```bash
-   # Use LUT and smaller grids
-   python run_workflow.py --quick-test
-   ```
-
-3. **Import errors in post-processing**
-   - The post-processing scripts may need fixes for function imports
-   - Use `constant_current_analysis.py` instead
-
-4. **Virtual environment issues**
-   ```bash
-   # Create fresh environment
-   python -m venv .venv
-   .venv\Scripts\activate.bat  # Windows
-   pip install -r requirements.txt
-   ```
-
-### Performance Tips
-
-- Use `--use-lut` for faster computation
-- Start with `--quick-test` for parameter exploration
-- Use smaller grids for initial testing
-- The LUT system caches results for reuse
-
-## Next Steps
-
-1. Run a quick test to verify everything works
-2. Examine the plots to understand the physics
-3. Adjust parameters based on your experimental setup
-4. Run full simulation for production results
-5. Use constant current analysis for experimental comparison 
+Outputs remain under `fer_output/` unless overridden. Simulation names contain
+a configuration identity and a unique run ID, so repeated runs do not replace
+one another. Axes, units, effective config, model/schema/calibration versions,
+and exact LUT linkage are stored with the legacy `I`, `z`, `V`, `A_rf` datasets.
+Legacy range summaries are derived from axes when metadata is absent. See
+[LUT management](LUT_MANAGEMENT.md) for cache identity and safe cleanup.

@@ -40,119 +40,15 @@ out_png = "dZdV_RelativeZ_vs_V.png"
 # ---------------------------
 # Helpers
 # ---------------------------
-def canonicalize(col: str) -> str:
-    """Normalize a column name to a lowercase token w/o spaces/slashes for easier matching."""
-    return col.strip().lower().replace(" ", "").replace("\\", "").replace("/", "")
+from fer_rf_sim.csv_data import canonicalize
 
-def map_columns(cols):
-    """
-    Build a dict mapping canonical keys to actual column names found in the file.
-    We try to be robust to name variants.
-    """
-    canon = {canonicalize(c): c for c in cols}
-    
-    # Canonical keys we want to find
-    keymap = {}
-    
-    # V
-    for k in ["v", "bias", "voltage"]:
-        if k in canon:
-            keymap["V"] = canon[k]; break
-    
-    # Current
-    for k in ["current", "i"]:
-        if k in canon:
-            keymap["Current"] = canon[k]; break
-    
-    # dI/dV (we won't plot it now, but keep mapping)
-    for k in ["di/dv", "didv", "dIdV".lower()]:
-        if k in canon:
-            keymap["dIdV"] = canon[k]; break
-    
-    # Z
-    if "z" in canon:
-        keymap["Z"] = canon["z"]
-    
-    # Setpoint
-    for k in ["setpoint", "isetpoint", "currentsetpoint"]:
-        if k in canon:
-            keymap["Setpoint"] = canon[k]; break
-    
-    # RF Freq
-    for k in ["rffreq", "rfreq", "rffrequency", "rf_freq"]:
-        if k in canon:
-            keymap["RFFreq"] = canon[k]; break
-    
-    # RF Power (try 'rfpower'; else a plain 'power' that is NOT 'vnapower')
-    rf_power_col = None
-    for k in ["rfpower", "rf_pow", "rfpwr"]:
-        if k in canon:
-            rf_power_col = canon[k]; break
-    if rf_power_col is None:
-        # try plain 'power' but avoid 'vnapower'
-        if "power" in canon and "vnapower" not in canon:
-            rf_power_col = canon["power"]
-    if rf_power_col is not None:
-        keymap["RFPower"] = rf_power_col
-    
-    # RF Voltage (optional)
-    for k in ["rfvoltage", "rfv", "rf_v"]:
-        if k in canon:
-            keymap["RFVoltage"] = canon[k]; break
-    
-    # FileName
-    for k in ["filename", "file", "fname"]:
-        if k in canon:
-            keymap["FileName"] = canon[k]; break
-    
-    # LineGroup
-    for k in ["linegroup", "group", "spectrumindex", "spectrumid"]:
-        if k in canon:
-            keymap["LineGroup"] = canon[k]; break
-    
-    # dZ/dV
-    for k in ["dz/dv", "dzdv"]:
-        if k in canon:
-            keymap["dZdV"] = canon[k]; break
-    
-    # RelativeZ
-    for k in ["relativez", "zrelative", "z_rel"]:
-        if k in canon:
-            keymap["RelativeZ"] = canon[k]; break
-    
-    return keymap
+from fer_rf_sim.csv_data import map_columns
 
-def read_header(path) -> list:
-    """Read only header from a CSV."""
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        first_line = f.readline()
-    # Use pandas for robust parsing (handles quoted headers with commas)
-    try:
-        df0 = pd.read_csv(path, nrows=0)
-        return list(df0.columns)
-    except Exception:
-        # fallback naive split
-        return [c.strip() for c in first_line.strip().split(DELIM)]
+from fer_rf_sim.csv_data import read_header
 
-def files_to_process(input_path: str):
-    p = Path(input_path)
-    if p.is_file():
-        return [str(p)]
-    elif p.is_dir():
-        # All CSV-like files in the directory
-        files = sorted([str(x) for x in p.glob("*.csv")])
-        if not files:
-            # If the folder/file happens to omit extension, try the exact path as a file
-            maybe_file = str(p)
-            if os.path.exists(maybe_file):
-                return [maybe_file]
-        return files
-    else:
-        return []
+from fer_rf_sim.csv_data import files_to_process
 
-def try_to_numeric(series):
-    """Convert series to numeric if possible; leaves as-is otherwise."""
-    return pd.to_numeric(series, errors="coerce")
+from fer_rf_sim.csv_data import try_to_numeric
 
 # ---------------------------
 # Streaming filter
@@ -163,41 +59,11 @@ files = files_to_process(INPUT_PATH)
 if not files:
     raise FileNotFoundError(f"No CSV files found at '{INPUT_PATH}'. If it's a single CSV, ensure the extension or correct path.")
 
-for fpath in files:
-    # Determine column mapping from header
-    header_cols = read_header(fpath)
-    cmap = map_columns(header_cols)
-    
-    # We need at least these to filter and plot
-    required = ["V", "Setpoint", "RFFreq", "RFPower", "dZdV", "RelativeZ"]
-    missing = [r for r in required if r not in cmap]
-    if missing:
-        # Continue to next file if this one doesn't have the required columns
-        # (You can print or log this to know which files were skipped)
-        # print(f"Skipping {fpath}: missing columns {missing}")
-        continue
-    
-    # Read only the columns we need to filter/plot (+ optional grouping columns)
-    usecols = list({cmap[k] for k in required} | set([cmap.get("LineGroup", ""), cmap.get("FileName", "")]) - {""})
-    
-    for chunk in pd.read_csv(fpath, usecols=usecols, chunksize=200_000):
-        # Canonical column names
-        chunk = chunk.rename(columns={v: k for k, v in cmap.items() if v in usecols})
-        
-        # Ensure numeric for filters/axes
-        for col in ["V", "Setpoint", "RFFreq", "RFPower", "dZdV", "RelativeZ"]:
-            chunk[col] = try_to_numeric(chunk[col])
-        
-        # Apply filters (with small tolerances for float repr)
-        tol_freq = 1.0  # Hz tolerance
-        mask = (
-            (chunk["Setpoint"] == TARGET_SETPOINT) &
-            (np.isfinite(chunk["RFFreq"])) & (np.abs(chunk["RFFreq"] - TARGET_RF_FREQ) <= tol_freq) &
-            (chunk["RFPower"] == TARGET_RF_POWER)
-        )
-        sel = chunk.loc[mask, ["V", "dZdV", "RelativeZ", *([ "LineGroup"] if "LineGroup" in chunk.columns else []), *([ "FileName"] if "FileName" in chunk.columns else [])]]
-        if not sel.empty:
-            selected_frames.append(sel)
+from fer_rf_sim.csv_data import iter_filtered_spectra
+selected_frames.extend(iter_filtered_spectra(
+    INPUT_PATH, setpoint=TARGET_SETPOINT, rf_frequency=TARGET_RF_FREQ,
+    rf_powers=[TARGET_RF_POWER], voltage_unit="mV", delimiter=DELIM,
+))
 
 # Concatenate all matching rows
 if not selected_frames:

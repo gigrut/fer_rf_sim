@@ -42,129 +42,19 @@ TARGET_RF_POWER_2 = 0  # Second power level to analyze
 # ---------------------------
 # Helper Functions (from both files)
 # ---------------------------
-def canonicalize(col: str) -> str:
-    """Normalize a column name to a lowercase token w/o spaces/slashes for easier matching."""
-    return col.strip().lower().replace(" ", "").replace("\\", "").replace("/", "")
+from fer_rf_sim.csv_data import canonicalize
 
-def map_columns(cols):
-    """
-    Build a dict mapping canonical keys to actual column names found in the file.
-    We try to be robust to name variants.
-    """
-    canon = {canonicalize(c): c for c in cols}
-    
-    # Canonical keys we want to find
-    keymap = {}
-    
-    # V
-    for k in ["v", "bias", "voltage"]:
-        if k in canon:
-            keymap["V"] = canon[k]; break
-    
-    # Current
-    for k in ["current", "i"]:
-        if k in canon:
-            keymap["Current"] = canon[k]; break
-    
-    # dI/dV (we won't plot it now, but keep mapping)
-    for k in ["di/dv", "didv", "dIdV".lower()]:
-        if k in canon:
-            keymap["dIdV"] = canon[k]; break
-    
-    # Z
-    if "z" in canon:
-        keymap["Z"] = canon["z"]
-    
-    # Setpoint
-    for k in ["setpoint", "isetpoint", "currentsetpoint"]:
-        if k in canon:
-            keymap["Setpoint"] = canon[k]; break
-    
-    # RF Freq
-    for k in ["rffreq", "rfreq", "rffrequency", "rf_freq"]:
-        if k in canon:
-            keymap["RFFreq"] = canon[k]; break
-    
-    # RF Power (try 'rfpower'; else a plain 'power' that is NOT 'vnapower')
-    rf_power_col = None
-    for k in ["rfpower", "rf_pow", "rfpwr"]:
-        if k in canon:
-            rf_power_col = canon[k]; break
-    if rf_power_col is None:
-        # try plain 'power' but avoid 'vnapower'
-        if "power" in canon and "vnapower" not in canon:
-            rf_power_col = canon["power"]
-    if rf_power_col is not None:
-        keymap["RFPower"] = rf_power_col
-    
-    # RF Voltage (optional)
-    for k in ["rfvoltage", "rfv", "rf_v"]:
-        if k in canon:
-            keymap["RFVoltage"] = canon[k]; break
-    
-    # FileName
-    for k in ["filename", "file", "fname"]:
-        if k in canon:
-            keymap["FileName"] = canon[k]; break
-    
-    # LineGroup
-    for k in ["linegroup", "group", "spectrumindex", "spectrumid"]:
-        if k in canon:
-            keymap["LineGroup"] = canon[k]; break
-    
-    # dZ/dV
-    for k in ["dz/dv", "dzdv"]:
-        if k in canon:
-            keymap["dZdV"] = canon[k]; break
-    
-    # RelativeZ
-    for k in ["relativez", "zrelative", "z_rel"]:
-        if k in canon:
-            keymap["RelativeZ"] = canon[k]; break
-    
-    return keymap
+from fer_rf_sim.csv_data import map_columns
 
-def read_header(path) -> list:
-    """Read only header from a CSV."""
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        first_line = f.readline()
-    # Use pandas for robust parsing (handles quoted headers with commas)
-    try:
-        df0 = pd.read_csv(path, nrows=0)
-        return list(df0.columns)
-    except Exception:
-        # fallback naive split
-        return [c.strip() for c in first_line.strip().split(DELIM)]
+from fer_rf_sim.csv_data import read_header
 
-def files_to_process(input_path: str):
-    p = Path(input_path)
-    if p.is_file():
-        return [str(p)]
-    elif p.is_dir():
-        # All CSV-like files in the directory
-        files = sorted([str(x) for x in p.glob("*.csv")])
-        if not files:
-            # If the folder/file happens to omit extension, try the exact path as a file
-            maybe_file = str(p)
-            if os.path.exists(maybe_file):
-                return [maybe_file]
-        return files
-    else:
-        return []
+from fer_rf_sim.csv_data import files_to_process
 
-def try_to_numeric(series):
-    """Convert series to numeric if possible; leaves as-is otherwise."""
-    return pd.to_numeric(series, errors="coerce")
+from fer_rf_sim.csv_data import try_to_numeric
 
-def dbm_to_mw(dBm):
-    mW = 10**(dBm/10)
-    return mW
+from fer_rf_sim.units import dbm_to_mw
 
-def dbm_to_mv(dBm):
-    # Convert dBm to zero-to-peak mV (50 ohm impedance)
-    # P(mW) = 10^(dBm/10), V_rms = sqrt(P * R), V_zero_to_peak = V_rms * sqrt(2)
-    mV = (2**0.5) * (50/1000)**(0.5) * (10**(dBm/20)) * 1000  # Convert V to mV
-    return mV
+from fer_rf_sim.units import dbm_to_mv
 
 def round_to_1sf(x):
     if x<=0:
@@ -179,56 +69,9 @@ def round_to_1sf(x):
 # RF Broadening Functions (adapted from Ag111 SS broadening.py)
 # ---------------------------
 
-def CGQ(func, V_DC, V_RF, n=100):
-    """Chebyshev-Gauss Quadrature for RF broadening.
-    Interpret func as dZ/dV(V), V_DC as the DC bias, V_RF as the RF amplitude, and n as the number of terms in the series.
-    This can handles V_DC as a vector (pandas Series or NumPy array)"""
-    i = np.array(range(1,n+1))
-    x = np.cos(np.pi*(2*i-1)/(2*n))
-    V_DC = np.asarray(V_DC)  # Convert V_DC to array if it's not already to ensure compatibility with broadcasting
-    arg = V_DC[:, None] + V_RF * x  # Broadcasting happens here
-    return np.sum(func(arg), axis=1) / n if V_DC.ndim > 0 else np.sum(func(arg)) / n
+from fer_rf_sim.quadrature import CGQ
 
-def broadenCGQ(spec, x_axis_name, y_axis_name, V_RF, n):
-    """Apply RF broadening using Chebyshev-Gauss quadrature.
-    params:
-    spec: a pandas dataframe representing a point spectrum.  It can be any size.
-    x_axis_name, y_axis_name: strings that correspond to the names of the two columns involved in the broadening
-        the x-axis is something like 'V' and the y-axis is something like 'dZdV'
-    V_RF: a float that represents the amplitude of the broadening.  It can have any units, but should match the units of the x-axis
-    n: an integer that tells the functions how many terms to use in the series approximation of the integral
-        n=100 seems to be plenty accurate and fast enough.
-    Returns a column corresponding to spec[y_axis_name] but broadened"""
-    if type(V_RF) == np.ndarray:
-        V_RF = V_RF.item()  
-    
-    # Remove duplicates and sort for interpolation
-    df_sorted = spec.sort_values(x_axis_name).drop_duplicates(subset=[x_axis_name])
-    
-    # Use cubic interpolation if we have enough points, otherwise fall back to linear
-    try:
-        if len(df_sorted) >= 4:  # Need at least 4 points for cubic
-            interp_func = interp1d(df_sorted[x_axis_name], df_sorted[y_axis_name], kind='cubic', 
-                                  bounds_error=False, fill_value=0.0)
-        else:
-            interp_func = interp1d(df_sorted[x_axis_name], df_sorted[y_axis_name], kind='linear', 
-                                  bounds_error=False, fill_value=0.0)
-    except ValueError:
-        # Fall back to linear if cubic fails
-        interp_func = interp1d(df_sorted[x_axis_name], df_sorted[y_axis_name], kind='linear', 
-                              bounds_error=False, fill_value=0.0)
-    df = spec.copy()
-    x_min = df[x_axis_name].min()
-    x_max = df[x_axis_name].max()
-    
-    # More conservative masking - only mask points very close to the edges
-    # This reduces NaN artifacts while still avoiding edge effects
-    edge_buffer = V_RF * 1.5  # Only mask if within 1.5*V_RF of edges
-    mask = (df[x_axis_name] - x_min < edge_buffer) | (x_max - df[x_axis_name] < edge_buffer)
-    
-    # Apply the CGQ function where the mask is False, and np.nan where True
-    broadened_col = np.where(mask, np.nan, CGQ(interp_func, df[x_axis_name], V_RF, n))
-    return broadened_col
+from fer_rf_sim.broadening import broadenCGQ
 
 def rms_error(params, spec1, spec2, x_axis_name, y_axis_name, n=100):
     """Returns the rms error between spec1 (assumed RF on/high power), and a broadened version of spec2 (assumed RF off/low power)."""
@@ -365,52 +208,18 @@ files = files_to_process(INPUT_PATH)
 if not files:
     raise FileNotFoundError(f"No CSV files found at '{INPUT_PATH}'. If it's a single CSV, ensure the extension or correct path.")
 
-for fpath in files:
-    # Determine column mapping from header
-    header_cols = read_header(fpath)
-    cmap = map_columns(header_cols)
-    
-    # We need at least these to filter and plot
-    required = ["V", "Setpoint", "RFFreq", "RFPower", "dZdV", "RelativeZ"]
-    missing = [r for r in required if r not in cmap]
-    if missing:
-        print(f"Skipping {fpath}: missing columns {missing}")
-        continue
-    
-    # Read only the columns we need to filter/plot (+ optional grouping columns)
-    usecols = list({cmap[k] for k in required} | set([cmap.get("LineGroup", ""), cmap.get("FileName", "")]) - {""})
-    
-    for chunk in pd.read_csv(fpath, usecols=usecols, chunksize=200_000):
-        # Canonical column names
-        chunk = chunk.rename(columns={v: k for k, v in cmap.items() if v in usecols})
-        
-        # Ensure numeric for filters/axes
-        for col in ["V", "Setpoint", "RFFreq", "RFPower", "dZdV", "RelativeZ"]:
-            chunk[col] = try_to_numeric(chunk[col])
-        
-        # Apply filters (with small tolerances for float repr)
-        tol_freq = 1.0  # Hz tolerance
-        tol_power = 0.1  # dBm tolerance for power (handles floating point errors near 0)
-        
-        # Filter for first power level (-30dBm)
-        mask1 = (
-            (chunk["Setpoint"] == TARGET_SETPOINT) &
-            (np.isfinite(chunk["RFFreq"])) & (np.abs(chunk["RFFreq"] - TARGET_RF_FREQ) <= tol_freq) &
-            (np.abs(chunk["RFPower"] - TARGET_RF_POWER) <= tol_power)
-        )
-        sel1 = chunk.loc[mask1, ["V", "dZdV", "RelativeZ", *([ "LineGroup"] if "LineGroup" in chunk.columns else []), *([ "FileName"] if "FileName" in chunk.columns else [])]]
-        if not sel1.empty:
-            selected_frames_power1.append(sel1)
-        
-        # Filter for second power level (1dBm)
-        mask2 = (
-            (chunk["Setpoint"] == TARGET_SETPOINT) &
-            (np.isfinite(chunk["RFFreq"])) & (np.abs(chunk["RFFreq"] - TARGET_RF_FREQ) <= tol_freq) &
-            (np.abs(chunk["RFPower"] - TARGET_RF_POWER_2) <= tol_power)
-        )
-        sel2 = chunk.loc[mask2, ["V", "dZdV", "RelativeZ", *([ "LineGroup"] if "LineGroup" in chunk.columns else []), *([ "FileName"] if "FileName" in chunk.columns else [])]]
-        if not sel2.empty:
-            selected_frames_power2.append(sel2)
+from fer_rf_sim.csv_data import iter_filtered_spectra
+for selected in iter_filtered_spectra(
+    INPUT_PATH, setpoint=TARGET_SETPOINT, rf_frequency=TARGET_RF_FREQ,
+    rf_powers=[TARGET_RF_POWER, TARGET_RF_POWER_2], voltage_unit="mV", delimiter=DELIM,
+    power_tolerance=0.1,
+):
+    first = selected.loc[np.abs(selected["RFPower"] - TARGET_RF_POWER) <= 0.1]
+    second = selected.loc[np.abs(selected["RFPower"] - TARGET_RF_POWER_2) <= 0.1]
+    if not first.empty:
+        selected_frames_power1.append(first)
+    if not second.empty:
+        selected_frames_power2.append(second)
 
 # Process first power level (-30dBm)
 if not selected_frames_power1:

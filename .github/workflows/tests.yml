@@ -1,0 +1,44 @@
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e ".[dev,plot,analysis]"
+      - run: python -m pytest -q
+      - run: python -m ruff check src/fer_rf_sim tests
+      - run: python -m build
+      - name: Isolated wheel smoke
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/fer-wheel"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            wheel_python="$RUNNER_TEMP/fer-wheel/Scripts/python.exe"
+          else
+            wheel_python="$RUNNER_TEMP/fer-wheel/bin/python"
+          fi
+          wheel=$(echo dist/*.whl)
+          "$wheel_python" -m pip install "$wheel[plot,analysis]"
+          "$wheel_python" tests/installed_smoke.py --expect-wheel
+  gui:
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -e ".[dev,gui,plot,analysis]"
+      - run: python -m pytest -q tests/test_gui.py

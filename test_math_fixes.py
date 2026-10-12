@@ -7,9 +7,10 @@ import numpy as np
 import pytest
 import warnings
 import subprocess
+import sys
 from pathlib import Path
 
-from FER_constant_current_simulation import (
+from fer_rf_sim.engine import (
     _cardano_two_smallest, 
     image_potential, 
     airy_all, 
@@ -22,17 +23,17 @@ from FER_constant_current_simulation import (
     direct_rf_current_grid,
 )
 
-import run_workflow
-from simulation_service import SimulationConfig, SimulationRunner
-from simulation_repository import SimulationRepository
-from FER_sim_post_processing import (
+from fer_rf_sim import workflow as run_workflow
+from fer_rf_sim.service import SimulationConfig, SimulationRunner
+from fer_rf_sim.repository import SimulationRepository
+from fer_rf_sim.analysis import (
     build_current_array,
     constant_current_slice,
     upsample_current_array,
 )
-from peak_analysis_service import detect_peaks
-import fer_sim_config
-from real_data_service import LEGACY_RF_AMPLITUDES, RealDataRepository
+from fer_rf_sim.peaks import detect_peaks
+from fer_rf_sim import legacy_config as fer_sim_config
+from fer_rf_sim.real_data import LEGACY_RF_AMPLITUDES, RealDataRepository
 
 
 def test_run_workflow_accepts_parameterized_sim_output(tmp_path, monkeypatch):
@@ -52,7 +53,10 @@ def test_run_workflow_accepts_parameterized_sim_output(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     assert run_workflow.run_quick_check() is True
-    assert calls == [["python", "quick_check.py"]]
+    assert calls == [[
+        sys.executable, "-m", "fer_rf_sim.check",
+        "--h5-path", str(output_file.resolve()),
+    ]]
 
 
 def test_run_workflow_requires_no_legacy_current_file(tmp_path, monkeypatch):
@@ -93,8 +97,8 @@ def test_simulation_runner_returns_artifact_path(monkeypatch, tmp_path):
         assert namespace.n_E == 8
         return expected
 
-    monkeypatch.setattr("simulation_service.simulate", fake_simulate)
-    config = SimulationConfig(n_E=8, n_V=2, n_Z=2, n_A=1, n_cheb=2)
+    monkeypatch.setattr("fer_rf_sim.service.simulate", fake_simulate)
+    config = SimulationConfig(n_E=8, n_V=2, n_Z=2, n_A=1, n_cheb=2, out=str(tmp_path))
     assert SimulationRunner().run(config) == expected
 
 
@@ -228,7 +232,7 @@ def test_real_data_repository_loads_z_dependent_csvs(tmp_path):
     )
     spectra = RealDataRepository().load(tmp_path)
     assert len(spectra) == 2
-    assert spectra[0].rf_amplitude == LEGACY_RF_AMPLITUDES[0]
+    assert spectra[0].rf_amplitude is None
     assert spectra[1].data["lockin-x (mV)"].tolist() == [3, 4]
 
 def test_cardano_solver():
@@ -324,11 +328,11 @@ def test_transmission():
     assert np.all((T >= 0) & (T <= 1)), "Transmission must be a probability"
     
     # Test with zero field (should use WKB)
-    T_wkb = transmission(E, 0.0, d, phi_t, phi_s)
+    T_wkb = transmission(E, 0.0, d, phi_t, phi_s, approximation="wkb")
     print(f"Zero field transmission: {T_wkb}")
     assert np.all(np.isfinite(T_wkb)), "WKB transmission should be finite"
     expected_wkb = 3.69 * np.exp(-2 * 5.12 * d * np.sqrt(phi_t + 5.5 - E))
-    assert np.allclose(T_wkb, expected_wkb)
+    np.testing.assert_allclose(T_wkb, expected_wkb, rtol=1e-12, atol=0)
     
     # Test with very small barrier thickness
     T_thin = transmission(E, V, 0.1, phi_t, phi_s)
@@ -440,7 +444,7 @@ def test_current_batch_matches_scalar_current():
         current(spectrum, energy, voltage)
         for spectrum, voltage in zip(spectra, voltages)
     ])
-    assert np.allclose(batched, expected)
+    np.testing.assert_allclose(batched, expected, rtol=1e-12, atol=0)
 
 
 def test_direct_rf_grid_matches_scalar_rf_average():
@@ -465,7 +469,8 @@ def test_direct_rf_grid_matches_scalar_rf_average():
             expected[j, k] = rf_averaged_current(
                 direct_transmission, energy, voltage, amplitude, cos_nodes,
             )
-    assert np.allclose(actual, expected)
+    assert np.any(expected != 0)
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=0)
 
 def test_fudge_calibration():
     """Test fudge factor calibration with edge cases."""

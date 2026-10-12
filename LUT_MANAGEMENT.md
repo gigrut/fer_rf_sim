@@ -1,109 +1,60 @@
-# LUT Management Best Practices
+# LUT Management
 
-## Overview
+Direct calculation is the built-in default. `--use-lut` enables a transmission
+lookup table with axes `(z, V, E)`. Bias coverage includes the full instantaneous
+RF voltage range. Energy/voltage/height upscaling creates matching data and axes;
+`--upscale-z`, `--upscale-v`, and `--upscale-e` override the common `--upscale`.
 
-The Look-Up Table (LUT) for transmission calculations is computationally expensive to generate but only needs to be computed once for a given set of parameters. This document explains how to manage LUT files efficiently.
+## Identity And Reuse
 
-## LUT File Naming
+New caches are named `transmission_lut_<sha256>.h5`. The identity covers exact
+axis values, unrounded work functions, calibrated WKB factor, Fermi energy,
+transition/blend settings, dtype, model/schema version and calibration recipe.
+The simulator, management utility and plot loaders share the compatibility
+implementation. Matching counts or rounded work functions alone are insufficient.
 
-LUT files are now automatically named based on their parameters:
-```
-transmission_lut_phi{phi_tip:.1f}_{phi_samp:.1f}_nE{n_E}_nV{n_V}_nZ{n_Z}.h5
-```
+Calibration explicitly evaluates WKB and Airy branches. The zero-blend boundary
+belongs to WKB; valid unit calibration ratios are retained. These changes are
+versioned so older numerical caches are not silently reused.
 
-For example: `transmission_lut_phi4.0_4.0_nE100_nV150_nZ100.h5`
+Both simulations and caches are written through temporary files followed by
+atomic publication. A simulation records the exact cache filename and identity.
+Repeated identical simulation runs get different run IDs while reusing an
+unchanged compatible cache. `--force-rebuild-lut` explicitly rebuilds the matching
+cache; it does not modify old, differently identified scientific outputs.
 
-This ensures that:
-- Different parameter sets get different LUT files
-- Files are never overwritten accidentally
-- You can easily identify which parameters each LUT corresponds to
+## Commands
 
-## Automatic LUT Reuse
-
-The simulation automatically:
-1. Checks if a compatible LUT exists for your parameters
-2. Loads the existing LUT if found (saving hours of computation)
-3. Only rebuilds the LUT if parameters have changed
-
-## Command Line Options
-
-### List Existing LUTs
-```bash
-python FER_constant_current_simulation.py --list-luts
-```
-
-### Force LUT Rebuild
-```bash
-python FER_constant_current_simulation.py --force-rebuild-lut [other options...]
+```powershell
+fer-sim lut list
+fer-sim lut list --brief
+fer-sim lut --fer-output another-directory list
+fer-sim simulate --list-luts
+fer-sim lut check --reference-lut path/to/reference-lut.h5
+fer-sim lut cleanup --keep 3
 ```
 
-## LUT Management Utility
+The compatibility command asks whether the output directory contains the full
+identity of a versioned reference LUT. Unknown legacy provenance cannot establish
+compatibility. It returns a nonzero status when no compatible cache exists.
 
-Use the `manage_luts.py` script for advanced LUT management:
+Cleanup is **dry-run by default**. Review its candidate list before adding the
+explicit `--delete` confirmation. It does not follow simulation references when
+choosing candidates, so retain caches needed by archived simulation artifacts.
+Negative keep counts are rejected. No cleanup command is run during tests against
+the repository's scientific output directory.
 
-### List All LUTs
-```bash
-python manage_luts.py list
-python manage_luts.py list --brief  # Show only file names and sizes
-```
+## Legacy Files
 
-### Check Compatibility
-```bash
-python manage_luts.py check --phi-tip 4.0 --phi-samp 4.0 --n-E 100 --n-V 150 --n-Z 100
-```
+Legacy LUTs and simulation datasets remain readable. Plotting a legacy LUT warns
+that model and calibration provenance are unknown; missing provenance is never
+treated as proof of compatibility. Simulation summaries recover missing ranges
+from stored axes. New artifact-linked plotting verifies the cache identity;
+direct artifacts have no linked LUT and require an explicit LUT selection for
+transmission plotting.
 
-### Clean Up Old LUTs
-```bash
-python manage_luts.py cleanup --keep 3  # Keep only 3 most recent LUTs
-```
-
-## When LUTs Are Rebuilt
-
-A LUT will be rebuilt if:
-- No compatible LUT exists
-- Work functions (phi_tip, phi_samp) have changed
-- Grid dimensions (n_E, n_V, n_Z) have changed
-- Grid ranges have changed
-- The `--force-rebuild-lut` flag is used
-
-## Storage Considerations
-
-- LUT files can be large (100MB+ for high-resolution grids)
-- Consider using `manage_luts.py cleanup` periodically to free disk space
-- LUT files are stored in the `fer_output/` directory
-- You can safely move/copy LUT files between machines with the same parameters
-
-## Best Practices
-
-1. **Start with coarse grids** for initial testing, then increase resolution
-2. **Use the same work functions** across related simulations to reuse LUTs
-3. **Check existing LUTs** before running new simulations
-4. **Back up important LUTs** if they took a long time to compute
-5. **Use `--force-rebuild-lut` sparingly** - only when you need to regenerate
-
-## Example Workflow
-
-```bash
-# 1. Check what LUTs you already have
-python manage_luts.py list
-
-# 2. Run a quick test with coarse grids
-python FER_constant_current_simulation.py --n-E 50 --n-V 50 --n-Z 50
-
-# 3. Run production simulation with fine grids (will reuse LUT if compatible)
-python FER_constant_current_simulation.py --n-E 200 --n-V 200 --n-Z 200
-
-# 4. Clean up old LUTs periodically
-python manage_luts.py cleanup --keep 5
-```
-
-## Troubleshooting
-
-**Problem**: LUT is being rebuilt unnecessarily
-**Solution**: Check that all parameters match exactly, including work functions
-
-**Problem**: LUT files taking too much disk space
-**Solution**: Use `manage_luts.py cleanup` or delete old LUT files manually
-
-**Problem**: LUT compatibility check fails
-**Solution**: Use `--force-rebuild-lut` to regenerate the LUT 
+Start convergence studies with temporary, small grids. Refine energy, voltage,
+height and RF quadrature independently and compare against direct current.
+Interpolation error is model/grid dependent; cache availability alone does not
+guarantee speed or scientific accuracy. See the
+[benchmark guide](TRANSMISSION_PLOTTING_EFFICIENCY.md).

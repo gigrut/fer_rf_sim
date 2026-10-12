@@ -1,139 +1,66 @@
-# Transmission Plotting Efficiency Improvements
+# Transmission Plotting And Performance
 
-## Overview
+## Axis Contracts
 
-The `plot_transmission.py` file has been optimized to address efficiency issues with the massive T_array generation. The original approach was creating a 50-million point array (100×100×50×100) which was slow and memory-intensive.
+Current arrays are `(z, V, A)`, LUTs are `(z, V, E)`, and RF-averaged transmission
+is `(z, V, A, E)`. Plot surfaces and heatmaps use rows for y and columns for x.
+Tests use unequal axis lengths to expose accidental transposes.
 
-## Key Improvements
+Two-dimensional transmission plots require two fixed axes or an explicit
+reduction. `requested_transmission_grid` reduces fixed axes before evaluating
+RF phases, so a V/A surface at fixed height and energy does not build the full
+four-dimensional grid. The full LUT is currently loaded into memory; this is not
+an on-disk lazy-slice implementation. Legacy energy-averaged helpers explicitly
+average samples, not a physical current integral.
 
-### 1. **Direct LUT Plotting** (`plot_transmission_direct_from_lut`)
-- **What it does**: Plots transmission directly from the LUT without building the full T_array
-- **Memory usage**: Only ~10-50 MB (vs 0.6 GB for full T_array)
-- **Speed**: Much faster for single plots
-- **Use case**: Perfect for exploration and single plots
-
-### 2. **Optimized T_array Building** (`build_T_array_from_lut`)
-- **Multiple parallelization strategies**: Parallelize over A or Z slices based on grid size
-- **A-parallelization**: Better load balancing for smaller grids (50 tasks vs 100)
-- **Z-parallelization**: Better for large grids with chunked processing
-- **Chunked processing**: Processes data in smaller chunks to reduce memory usage
-- **Better compression**: Uses higher compression (level 6) for HDF5 files
-- **Memory estimation**: Shows memory requirements before building
-- **Adaptive processing**: Automatically chooses best strategy based on grid dimensions
-
-### 3. **Smart Default Behavior**
-- **No T_array exists**: Uses direct plotting (fast)
-- **T_array exists**: Uses pre-computed data (fast for multiple plots)
-- **Force direct**: `--direct` flag forces direct plotting even if T_array exists
-
-## Memory Usage Analysis
-
-Current grid (100×100×50×100):
-- **T_array size**: 0.37 GB
-- **RF averaging per slice**: 0.12 GB  
-- **Total estimated**: 0.61 GB
-- **Direct plotting**: ~0.01 GB
-
-## Usage Examples
-
-### Quick Plot (Recommended for exploration)
-```bash
-python plot_transmission.py
-# Automatically uses direct plotting if no T_array exists
+```powershell
+fer-sim transmission --lut-path path/to/lut.h5 --config fer_config.yaml --x V --y A --z 0.3 --e 1.0
+fer-sim transmission --lut-path path/to/lut.h5 --x E --y V --z 0.3 --a 0 --html transmission.html
 ```
 
-### Force Direct Plotting
-```bash
-python plot_transmission.py --direct
-# Always uses direct plotting, even if T_array exists
+Fixed values select the nearest in-range configured sample. Omitted fixed values
+use the first configured sample. Out-of-range values and instantaneous RF voltages
+outside LUT coverage are errors, not zero-filled transmission. The config supplies
+plot sampling axes; the explicitly selected LUT supplies transmission physics.
+Energy is eV, height nm, bias V and RF amplitude V peak. The legacy `x` energy-axis
+alias remains accepted by the Python slice helper; the CLI calls it `E`.
+
+Current figures consume simulated/integrated current, never a sum of transmission
+samples. RF current integrates the instantaneous occupation window at each phase
+before averaging. Direct and LUT backends share batched current integration, with
+bounded amplitude chunks; height rows can run through joblib.
+
+## Benchmark
+
+```powershell
+python benchmark_lut_vs_direct.py --repeats 3
 ```
 
-### Build T_array (for repeated analysis)
+This runs the actual service on matched small inputs in a temporary directory.
+It reports direct time, cold-LUT time, LUT build time, repeated warm-LUT time,
+cache reuse, traced peak memory, absolute error and relative error at nonzero
+direct-current cells. Tiny physical values are not hidden by an arbitrary error
+denominator offset. Benchmark files are removed with their temporary directory.
 
-**From IDE (Recommended):**
-1. Edit `fer_sim_config.py` to set `parallel_strategy = 'A'` (or 'Z', 'auto')
-2. In `plot_transmission.py`, uncomment the line: `# build_tarray_from_config()`
-3. Run with IDE play button
+Measurements are single-process wall time with cProfile and tracemalloc enabled,
+including calibration and HDF5 I/O. Traced allocation peaks are **not total RSS**
+and exclude untracked native/child-process allocations. These measurements do not
+predict production speed or impose hardware-specific CI timing thresholds.
 
-**From command line:**
-```bash
-python plot_transmission.py --build
-# Builds and saves T_array for future fast plotting
+## Profile
 
-# Choose parallelization strategy:
-python plot_transmission.py --build --parallel-strategy A
-# Force parallelization over A slices (better for small grids)
-
-python plot_transmission.py --build --parallel-strategy Z  
-# Force parallelization over Z slices (better for large grids)
+```powershell
+python profile_simulation.py --n_E 16 --n_V 4 --n_Z 2 --n_A 2 --n_cheb 4 --threads 1 --out profile-results
 ```
 
-### Check Memory Requirements
-```bash
-python plot_transmission.py --memory-info
-# Shows memory usage for current grid
-```
+The profiler calls `SimulationRunner` directly and writes a uniquely named profile
+under the selected output's `profiles` directory, or `--profile-dir`. It does not
+replace the repository's existing profile. SnakeViz is optional and starts only
+when explicitly requested with `--snakeviz`; install it separately first.
 
-### Compare Methods
-```bash
-python plot_transmission.py --compare
-# Shows pros/cons of each method
-```
+## Desktop Rendering
 
-## When to Use Each Method
-
-### Direct LUT Plotting
-- ✅ Single plots or exploration
-- ✅ Limited memory available
-- ✅ Quick visualization needs
-- ❌ Multiple plots with same data
-- ❌ Repeated analysis
-
-### T_array Building
-- ✅ Multiple plots with same data
-- ✅ Repeated analysis
-- ✅ Batch processing
-- ❌ Limited memory
-- ❌ Single quick plots
-
-## Performance Comparison
-
-| Method | Memory | First Plot | Subsequent Plots | Use Case |
-|--------|--------|------------|------------------|----------|
-| Direct | ~10MB | Fast | Slow | Exploration |
-| T_array | ~600MB | Slow | Very Fast | Analysis |
-
-## Parallelization Strategies
-
-### A-Parallelization (Recommended for current grid)
-- **Tasks**: 50 (one per A value)
-- **Load balancing**: Excellent (all tasks similar size)
-- **Memory per task**: ~12MB per A slice
-- **Best for**: Grids with n_A ≤ 100 and total points ≤ 50M
-
-### Z-Parallelization (Original method)
-- **Tasks**: 100 (one per Z value)  
-- **Load balancing**: Good (all tasks similar size)
-- **Memory per task**: ~6MB per Z slice
-- **Best for**: Large grids (>50M points) or when n_A > 100
-
-## Configuration
-
-The efficiency is controlled by parameters in `fer_sim_config.py`:
-- `n_Z`, `n_V`, `n_A`, `n_E`: Grid dimensions
-- `n_cheb`: Number of Chebyshev nodes for RF averaging
-- `parallel_strategy`: Parallelization strategy ('auto', 'A', 'Z')
-
-### Parallelization Strategy Options:
-- **'auto'**: Automatically choose best strategy based on grid size
-- **'A'**: Force parallelization over A slices (50 tasks, better for small grids)
-- **'Z'**: Force parallelization over Z slices (100 tasks, better for large grids)
-
-Reducing grid dimensions will significantly improve performance and reduce memory usage.
-
-## Future Improvements
-
-1. **Lazy loading**: Load T_array slices on demand
-2. **Caching**: Cache frequently used slices
-3. **Progressive loading**: Load data progressively for large grids
-4. **GPU acceleration**: Use GPU for RF averaging calculations 
+The optional GUI uses one local Plotly HTML document shared by both plot views.
+Updates use `Plotly.react` without rewriting HTML or loading Plotly from a CDN.
+Derivatives are computed once per loaded artifact, and the setpoint cache has a
+16-entry limit with invalidation on reload. No new peak/RF GUI feature is implied.
